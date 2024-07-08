@@ -1,58 +1,33 @@
 #include <Keyboard.h>
 #include <Mouse.h>
 
-int buttonPin = 9;  // Set a button to any pin
-int dumpPin = 8;    // Set a button to any pin
+//#define DEBUG
+
+int pausePin = 9;     // Set a button to any pin
+int trainingPin = 8;  // Set a button to any pin
+
+int audioPin = A0;
+int opticalPin = A1;
 
 enum class State {
   LISTENING,
   TRACKING,
+  PRE_LOOK,
   REELING_IN,
+  POST_LOOK,
+  DISCARD,
   CASTING,
 };
 
 State state = State::LISTENING;
 
-//#define DEBUG
 
 void setup() {
-  pinMode(buttonPin, INPUT);      // Set the button as an input
-  pinMode(dumpPin, INPUT);        // Set the button as an input
-  digitalWrite(buttonPin, HIGH);  // Pull the button high
-  digitalWrite(dumpPin, HIGH);    // Pull the button high
+  pinMode(pausePin, INPUT);         // Set the button as an input
+  pinMode(trainingPin, INPUT);      // Set the button as an input
+  digitalWrite(pausePin, HIGH);     // Pull the button high
+  digitalWrite(trainingPin, HIGH);  // Pull the button high
 }
-
-// circular buffer.
-// we'll store as char.
-struct Buffer {
-  // assume even so only need start and end.
-  // at least for now.
-
-  static const int bufferSize = 1024;
-  char deltas[bufferSize];
-  int startIndex = 0;
-  int length = 0;
-  bool enabled = true;
-
-  void enable(bool enable) {
-    enabled = enable;
-  }
-
-  addSample(char value) {
-    if (!enabled) {
-      return;
-    }
-
-    deltas[(startIndex + length) & (bufferSize - 1)] = value;
-
-    if (length < bufferSize) {
-      ++length;
-    } else {
-      ++startIndex;                    // rolling buffer.
-      startIndex &= (bufferSize - 1);  // wrap!
-    }
-  }
-};
 
 
 #ifdef DEBUG
@@ -65,45 +40,145 @@ unsigned long samples = 0;
 
 // the current envelope value.
 long envelope = 0;
-// current chunk.
-long chunk = 0;
-long chunkIndex = 0;
-long chunkVal = 0;
 
-long lastChunkVal = 0;
-bool tracking = false;
-long sampleTimeout = 1;
+struct PatternMatcher {
+
+  static const int numElements = 16;
+  static const int samplesPerElement = 64;  // per element.
+
+  PatternMatcher() {
+    for (int i = 0; i < numElements; ++i) {
+      pattern[i] = 0;
+    }
+  }
+
+  void clear() {
+    numPatterns = 0;
+  }
+
+  void startSampling() {
+    currentSample = 0;
+    currentElement = 0;
+    currentPattern[currentElement] = 0;
+    success = false;
+  }
+
+  // Adds a sample, returns true when finished.
+  bool addSample(int value) {
+    currentPattern[currentElement] += abs(value);
+    ++currentSample;
+    if (currentSample == samplesPerElement) {
+      currentSample = 0;
+      ++currentElement;
+      if (currentElement == numElements) {
+        // we are done!  Find the max, normalize, etc.
+        int maxVal = 0;
+        for (int i = 0; i < numElements; ++i) {
+          maxVal = max(maxVal, currentPattern[i]);
+        }
+
+        float squaredErr = 0;
+
+        Serial.print(" current: ");
+        for (int i = 0; i < numElements; ++i) {
+          float tmp = float(currentPattern[i]) / float(maxVal);
+          float err = tmp - pattern[i];
+          squaredErr += err * err;
+          Serial.print(tmp);
+          Serial.print(F(", "));
+        }
+        squaredErr /= numElements;
+        Serial.println("");
+        Serial.print(" squared error: ");
+        Serial.println(squaredErr);
+
+        success = squaredErr < threshold;
+        return true;
+
+      } else {
+        currentPattern[currentElement] = 0;
+      }
+    }
+
+    // not done.
+    return false;
+  }
+
+  // current pattern is good, integrate it.
+  void integratePattern() {
+    // we are done!  Find the max, normalize, etc.
+    int maxVal = 0;
+    for (int i = 0; i < numElements; ++i) {
+      maxVal = max(maxVal, currentPattern[i]);
+    }
+    for (int i = 0; i < numElements; ++i) {
+      float tmp = float(currentPattern[i]) / float(maxVal);
+      pattern[i] = (pattern[i] * numPatterns + tmp) / (numPatterns + 1);
+    }
+    // print the new pattern.
+    Serial.print(" pattern ");
+    Serial.print(numPatterns);
+    Serial.print(": ");
+    for (int i = 0; i < numElements; ++i) {
+      Serial.print(pattern[i]);
+      Serial.print(F(", "));
+    }
+    Serial.println("");
+    ++numPatterns;
+  }
+
+  bool success = false;
+
+  // current pattern sample.
+  int currentSample = 0;
+
+  // the current pattern we are gathering.  We match them all.
+  // before deciding.
+  int currentPattern[numElements];
+  // the averaged pattern.
+  float pattern[numElements];
+  // how many so far, need for adding into.
+  int numPatterns = 0;
+  // if squared error beats this, then we do it.
+  int currentElement = 0;  // which element we are adding to currently.
+  // for matching, during training, starts high.
+  float threshold = 1;
+};
+
+
+PatternMatcher pattern;
+
+long sampleTimeout = 10;
 long failures = 0;
 long successes = 0;
-bool highers[5] = { true, true, false, false, false };
+float preLookVal = 0;  // before we fished.
+bool paused = false;
+bool training = false;
 
 void loop() {
 
   // note we can read more samples now.
-  long val = analogRead(A0) - 511;
+  long val = analogRead(audioPin) - 511;
 
-#ifdef DEBUG
-  if ((abs(val) > 50) && (stopIndex == -1) && (downMs == 0) && buffer.enabled) {
-    // this is a self trigger.
-    downMs = millis();
-    samples = 0;
-    // assume full, we will only read bufferSize - 200 samples.
-    stopIndex = (buffer.startIndex + (buffer.bufferSize - 64)) & (buffer.bufferSize - 1);
-    stoppedMs = 0;
+  //  Serial.println(analogRead(opticalPin));
+  if (digitalRead(pausePin) == 0) {
+    delay(1000);
+    return;
   }
-  if ((buffer.startIndex == stopIndex) && (stoppedMs == 0) && buffer.enabled) {
-    stoppedMs = millis();
-    Serial.print(F("stopped at index "));
-    Serial.print(stopIndex);
-    long stopped = (stoppedMs - downMs) * 2;
-    Serial.print(F("Stopped Ms: "));
-    Serial.println(stopped);
 
-    buffer.enable(false);
+  bool t = digitalRead(trainingPin) == 0;
+  if (t != training) {
+    if (t) {
+      Serial.println(F("Start Training"));
+      pattern.clear();
+      pattern.threshold = 1.0f;
+    } else {
+      Serial.println(F("End Training"));
+      // todo determine, maybe by keeping some filtered versions.
+      pattern.threshold = .03f;
+    }
+    training = t;
   }
-  buffer.addSample(val);
-
-#endif
 
   envelope = max(envelope * .99, abs(val));
 
@@ -114,8 +189,17 @@ void loop() {
         case State::LISTENING:
           Serial.println(F("Listening..."));
           break;
+        case State::PRE_LOOK:
+          Serial.println(F("Pre look"));
+          break;
         case State::REELING_IN:
           Serial.println(F("Reeling In"));
+          break;
+        case State::POST_LOOK:
+          Serial.println(F("Post look"));
+          break;
+        case State::DISCARD:
+          Serial.println(F("Discard"));
           break;
         case State::CASTING:
           Serial.println(F("Casting"));
@@ -130,53 +214,92 @@ void loop() {
             //    Serial.print(F("now"));
             //Serial.println(val);
             state = State::TRACKING;
-            chunkIndex = 0;
-            chunk = 0;
-            chunkVal = 0;
-            lastChunkVal = 0;
+            pattern.startSampling();
           }
           break;
         }
       case State::TRACKING:
         {
-          chunkVal += envelope;
-          ++chunk;
-          if (chunk == 64) {
-            // keep going or fail.
-            bool success = (chunkVal >= lastChunkVal) == highers[chunkIndex];
-            if (!success) {
+          // returns true when finished.
+          if (pattern.addSample(envelope)) {
+            if (pattern.success) {
+              Serial.println(" Success!");
+              ++successes;
+              state = State::PRE_LOOK;
+              sampleTimeout = 2000;  // wait a quarter second before reeling in.
+            } else {
               ++failures;
-              Serial.print(F("Failed!!! at "));
-              Serial.println(chunkIndex);
-              printSuccesses();
+              Serial.println(F(" Failed!!!"));
               state = State::LISTENING;
               sampleTimeout = 4000;  // wait a second.
-            } else {
-              lastChunkVal = chunkVal;
-              chunk = 0;
-              chunkVal = 0;
-              ++chunkIndex;
-              if (chunkIndex == 5) {
-                Serial.println("Success!");
-                ++successes;
-                printSuccesses();
-                state = State::REELING_IN;
-                sampleTimeout = 2000;  // wait a quarter second before reeling in.
-                break;
-              }
             }
+            printSuccesses();
           }
+          break;
+        }
+      case State::PRE_LOOK:
+        {
+          preLookVal = analogRead(opticalPin);
+          Serial.print(F(" preLookVal: "));
+          Serial.println(preLookVal);
+          sampleTimeout = 1;
+          state = State::REELING_IN;
           break;
         }
       case State::REELING_IN:
         {
           Mouse.click(MOUSE_RIGHT);
-          sampleTimeout = 8000;  // wait a second before casting.
+          sampleTimeout = 8000;  // wait a second before looking, so it lands.
+          state = State::POST_LOOK;
+          break;
+        }
+      case State::POST_LOOK:
+        {
+          float postLookVal = analogRead(opticalPin);
+          Serial.print(F("postLookVal: "));
+          Serial.println(postLookVal);
+          sampleTimeout = 1;  // wait a second before casting.
+
+          // if 10% higher.8k9
+          if (postLookVal > preLookVal * 1.15f) {
+            state = State::DISCARD;
+            if (training) {
+              Serial.println(" Integrating pattern");
+              pattern.integratePattern();
+            }
+          } else {
+            state = State::CASTING;
+            if (training) {
+              Serial.println(" Discarding pattern");
+            }
+            // TODO note that it was a failure, and we don't have to discard anything.
+          }
+
+          break;
+        }
+      case State::DISCARD:
+        {
+          // We'll roll discard in for now.
+          Keyboard.write('8');
+          delay(200);
+          Keyboard.write('k');
+          delay(200);
+          Keyboard.write('9');
+          delay(200);
           state = State::CASTING;
+          sampleTimeout = 4000;
           break;
         }
       case State::CASTING:
         {
+          // We'll roll discard in for now.
+          Keyboard.write('8');
+          delay(200);
+          Keyboard.write('k');
+          delay(200);
+          Keyboard.write('9');
+          delay(200);
+
           Mouse.click(MOUSE_RIGHT);
           sampleTimeout = 16000;  // wait a second before listening.
           state = State::LISTENING;
