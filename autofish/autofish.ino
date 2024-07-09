@@ -59,10 +59,8 @@ public:
 SerialWrapper sout;
 
 void setup() {
-  pinMode(pausePin, INPUT);         // Set the button as an input
-  pinMode(trainingPin, INPUT);      // Set the button as an input
-  digitalWrite(pausePin, HIGH);     // Pull the button high
-  digitalWrite(trainingPin, HIGH);  // Pull the button high
+  pinMode(pausePin, INPUT);     // Set the button as an input
+  pinMode(trainingPin, INPUT);  // Set the button as an input
 }
 
 
@@ -164,8 +162,8 @@ struct PatternMatcher {
   int numPatterns = 0;
   // if squared error beats this, then we do it.
   int currentElement = 0;  // which element we are adding to currently.
-  // for matching, during training, starts high.
-  float threshold = 1;
+  // for matching, must be less to pass.
+  float threshold = 0;
   bool training = false;
 };
 
@@ -187,22 +185,39 @@ float preLookVal = 0;  // before we fished.
 // we'll keep raising this until we get a true value.
 float initialThreshold = 50;
 
+// when we last cast, used for a timeout during listening
+// The lure can get stuck on something in the water
+// and just float around until we pull it out.
+unsigned long lastCastMs = 0;
+
+bool paused = false;
+
 void loop() {
 
   // note we can read more samples now.
   long val = analogRead(audioPin) - 511;
 
   //  Serial.println(analogRead(opticalPin));
-  if (digitalRead(pausePin) == 0) {
+  if (digitalRead(pausePin)) {
+
+    if (!paused) {
+      sout << F("PAUSED\n");
+      paused = true;
+    }
+
     //Serial.println(analogRead(opticalPin));
     delay(1000);
     return;
+  } else if (paused) {
+    sout << F("UNPAUSED\n");
+    paused = false;
   }
 
-  bool t = digitalRead(trainingPin) == 0;
-  if (t != pattern.training) {
-    if (t) {
-      sout << F("Start Training\n");
+  // see if training.
+  if (digitalRead(trainingPin) != pattern.training) {
+    pattern.training = !pattern.training;
+    if (pattern.training) {
+      sout << F("START TRAINING\n");
       pattern.clear();
       initialThreshold = 50;
       successErr = 0;
@@ -210,12 +225,11 @@ void loop() {
     } else {
       // todo determine, maybe by keeping some filtered versions.
       pattern.threshold = (successErr + failureErr) / 2.0f;
-      sout << F("End Training, thresh: ") << pattern.threshold << '\n';
+      sout << F("END TRAINING, thresh: ") << pattern.threshold << '\n';
       successes = 0;
       failures = 0;
       falsePositives = 0;
     }
-    pattern.training = t;
   }
 
   envelope = max(envelope * .99, abs(val));
@@ -248,6 +262,13 @@ void loop() {
     switch (state) {
       case State::LISTENING:
         {
+          // timeout, we are stuck on something.
+          if (millis() - lastCastMs > 60000) {
+            sout << F(" LastCast Timeout exceeding, reeling in\n");
+            state = State::REELING_IN;
+            sampleTimeout = 1;
+          }
+
           if (abs(val) > initialThreshold) {
             //    Serial.print(F("now"));
             //Serial.println(val);
@@ -306,9 +327,9 @@ void loop() {
           if (present) {
             state = State::DISCARD;
             if (pattern.training) {
-              sout << F(" Integrating");
+              sout << F("  Integrating");
               pattern.integratePattern();
-              sout << F(" lastErr: ") << pattern.lastErr << F(", old successErr: ") << successErr << '\n';
+              sout << F("  lastErr: ") << pattern.lastErr << F(", old successErr: ") << successErr << '\n';
               // need at least one already.
               if (pattern.numPatterns > 1) {
                 successErr = (successErr == 0) ? pattern.lastErr : (successErr * .9f + pattern.lastErr * .1f);
@@ -319,8 +340,8 @@ void loop() {
           } else {
             state = State::DISCARD;
             if (pattern.training) {
-              sout << F(" Discarding pattern\n");
-              sout << F(" lastErr: ") << pattern.lastErr << F(", old failureErr: ") << failureErr << F(", FP Streak: ") << falsePositiveStreak << '\n';
+              sout << F("  Discarding pattern\n");
+              sout << F("  lastErr: ") << pattern.lastErr << F(", old failureErr: ") << failureErr << F(", FP Streak: ") << falsePositiveStreak << '\n';
 
               if (pattern.numPatterns > 0) {
                 failureErr = (failureErr == 0) ? pattern.lastErr : (failureErr * .9f + pattern.lastErr * .1f);
@@ -360,6 +381,7 @@ void loop() {
           Mouse.click(MOUSE_RIGHT);
           sampleTimeout = 16000;  // wait a second before listening.
           state = State::LISTENING;
+          lastCastMs = millis();
           break;
         }
     };
@@ -397,7 +419,7 @@ void printStats() {
 }
 
 void printSuccessFailureErrs() {
-  sout << F(" new SuccessErr: ") << successErr << F(", new FailureErr: ") << failureErr << '\n';
+  sout << F("  new SuccessErr: ") << successErr << F(", new FailureErr: ") << failureErr << '\n';
 }
 
 #ifdef DEBUG
