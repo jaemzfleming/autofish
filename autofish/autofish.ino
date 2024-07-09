@@ -21,6 +21,42 @@ enum class State {
 
 State state = State::LISTENING;
 
+class SerialWrapper {
+public:
+  template<typename T>
+  SerialWrapper& operator<<(const T& data) {
+    Serial.print(data);
+    return *this;
+  }
+
+  template<size_t N>
+  SerialWrapper& operator<<(const int (&array)[N]) {
+    *this << "(";
+    for (size_t i = 0; i < N; i++) {
+      *this << array[i];
+      if (i < N - 1) {
+        *this << ", ";
+      }
+    }
+    *this << ")";
+    return *this;
+  }
+
+  template<size_t N>
+  SerialWrapper& operator<<(const float (&array)[N]) {
+    *this << "(";
+    for (size_t i = 0; i < N; i++) {
+      *this << array[i];
+      if (i < N - 1) {
+        *this << ", ";
+      }
+    }
+    *this << ")";
+    return *this;
+  }
+};
+
+SerialWrapper sout;
 
 void setup() {
   pinMode(pausePin, INPUT);         // Set the button as an input
@@ -73,27 +109,22 @@ struct PatternMatcher {
       ++currentElement;
       if (currentElement == numElements) {
         lastErr = 0;
-        Serial.print(" current: ");
+
         for (int i = 0; i < numElements; ++i) {
           currentPattern[i] /= samplesPerElement;
           float err = float(currentPattern[i]) - pattern[i];
           lastErr += err * err;
-          Serial.print(currentPattern[i]);
-          Serial.print(F(", "));
         }
         lastErr /= numElements;
         lastErr = sqrt(lastErr);
 
         success = training || (lastErr < threshold);
-
-        if (success) {
-          Serial.print(F("  Success: "));
+        if (training) {
+          sout << F(" Done! err: ") << lastErr;
         } else {
-          Serial.print(F("  Failure: "));
+          sout << (success ? F(" Match: ") : F(" No Match: ")) << lastErr << (success ? F(" < ") : F(" > ")) << threshold;
         }
-        Serial.print(lastErr);
-        Serial.print(F(" < "));
-        Serial.println(threshold);
+        sout << ' ' << currentPattern << '\n';
 
         return true;
 
@@ -110,18 +141,10 @@ struct PatternMatcher {
   void integratePattern() {
     // we are done!
     for (int i = 0; i < numElements; ++i) {
-      float tmp = float(currentPattern[i]);
-      pattern[i] = (pattern[i] * numPatterns + tmp) / (numPatterns + 1);
+      pattern[i] = (pattern[i] * numPatterns + currentPattern[i]) / (numPatterns + 1);
     }
     // print the new pattern.
-    Serial.print(" pattern ");
-    Serial.print(numPatterns);
-    Serial.print(": ");
-    for (int i = 0; i < numElements; ++i) {
-      Serial.print(pattern[i]);
-      Serial.print(F(", "));
-    }
-    Serial.println("");
+    sout << F(" pattern ") << numPatterns << F(": ") << pattern << '\n';
     ++numPatterns;
   }
 
@@ -154,6 +177,7 @@ float failureErr = 0;  // filtered.
 
 long successes = 0;
 long failures = 0;
+long falsePositives = 0;
 
 // during training, every 5 bumps up the initial threshold.
 int falsePositiveStreak = 0;
@@ -178,18 +202,18 @@ void loop() {
   bool t = digitalRead(trainingPin) == 0;
   if (t != pattern.training) {
     if (t) {
-      Serial.println(F("Start Training"));
+      sout << F("Start Training\n");
       pattern.clear();
       initialThreshold = 50;
       successErr = 0;
       failureErr = 0;
     } else {
-      Serial.print(F("End Training, thresh: "));
       // todo determine, maybe by keeping some filtered versions.
       pattern.threshold = (successErr + failureErr) / 2.0f;
-      Serial.println(pattern.threshold);
+      sout << F("End Training, thresh: ") << pattern.threshold << '\n';
       successes = 0;
       failures = 0;
+      falsePositives = 0;
     }
     pattern.training = t;
   }
@@ -201,22 +225,22 @@ void loop() {
     if (sampleTimeout == 0) {
       switch (state) {
         case State::LISTENING:
-          Serial.println(F("Listening..."));
+          sout << F("LISTENING...\n");
           break;
         case State::PRE_LOOK:
-          Serial.println(F("Pre look"));
+          sout << F("PRE LOOK\n");
           break;
         case State::REELING_IN:
-          Serial.println(F("Reeling In"));
+          sout << F("REELING IN\n");
           break;
         case State::POST_LOOK:
-          Serial.println(F("Post look"));
+          sout << F("POST LOOK\n");
           break;
         case State::DISCARD:
-          Serial.println(F("Discard"));
+          sout << F("DISCARD\n");
           break;
         case State::CASTING:
-          Serial.println(F("Casting"));
+          sout << F("CASTING\n");
           break;
       }
     }
@@ -246,7 +270,7 @@ void loop() {
               sampleTimeout = 4000;  // wait a second.
             }
             if (!pattern.training) {
-              printSuccesses();
+              printStats();
             }
           }
           break;
@@ -268,22 +292,23 @@ void loop() {
       case State::POST_LOOK:
         {
           float postLookVal = analogRead(opticalPin);
-          Serial.print(F(" pre/postLookVal: "));
-          Serial.print(preLookVal);
-          Serial.print(F("/"));
-          Serial.println(postLookVal);
-          sampleTimeout = 1;  // wait a second before casting.
+          sampleTimeout = 1;
+
+          const bool present = (postLookVal > preLookVal * 1.3f && postLookVal > 20);
+
+          if (!pattern.training && !present) {
+            ++falsePositives;
+          }
+
+          sout << ' ' << (present ? F("Present! ") : F("Not Present! ")) << F("Pre: ") << preLookVal << F(", Post: ") << postLookVal << '\n';
 
           // if 50% higher.8k9.  I know, it's rash but it gets bright.
-          if (postLookVal > preLookVal * 1.3f && postLookVal > 20) {
+          if (present) {
             state = State::DISCARD;
             if (pattern.training) {
-              Serial.println(" Integrating pattern");
+              sout << F(" Integrating");
               pattern.integratePattern();
-              Serial.print(F(" lastErr and old successErr "));
-              Serial.print(pattern.lastErr);
-              Serial.print(" ");
-              Serial.println(successErr);
+              sout << F(" lastErr: ") << pattern.lastErr << F(", old successErr: ") << successErr << '\n';
               // need at least one already.
               if (pattern.numPatterns > 1) {
                 successErr = (successErr == 0) ? pattern.lastErr : (successErr * .9f + pattern.lastErr * .1f);
@@ -294,13 +319,8 @@ void loop() {
           } else {
             state = State::DISCARD;
             if (pattern.training) {
-              Serial.println(" Discarding pattern");
-              Serial.print(F(" lastErr and old failureErr and FPS "));
-              Serial.print(pattern.lastErr);
-              Serial.print(" ");
-              Serial.println(failureErr);
-              Serial.print(" ");
-              Serial.println(falsePositiveStreak);
+              sout << F(" Discarding pattern\n");
+              sout << F(" lastErr: ") << pattern.lastErr << F(", old failureErr: ") << failureErr << F(", FP Streak: ") << falsePositiveStreak << '\n';
 
               if (pattern.numPatterns > 0) {
                 failureErr = (failureErr == 0) ? pattern.lastErr : (failureErr * .9f + pattern.lastErr * .1f);
@@ -309,15 +329,13 @@ void loop() {
                 if (++falsePositiveStreak >= 5) {
                   falsePositiveStreak = 0;
                   initialThreshold *= 1.1f;
-                  Serial.print(F(" Init threshold now "));
-                  Serial.println(initialThreshold);
+                  sout << F(" Init threshold now ") << initialThreshold << '\n';
                 }
               }
 
               if (pattern.numPatterns == 0) {
                 initialThreshold *= 1.1f;
-                Serial.print(F(" Init threshold now "));
-                Serial.println(initialThreshold);
+                sout << F(" Init threshold now ") << initialThreshold << '\n';
               }
             }
             // TODO note that it was a failure, and we don't have to discard anything.
@@ -373,18 +391,13 @@ void loop() {
 #endif
 }
 
-void printSuccesses() {
-  Serial.print(F(" Successes/Failures: "));
-  Serial.print(successes);
-  Serial.print(F("/"));
-  Serial.println(failures);
+// TODO add false positives, a match but no fish.
+void printStats() {
+  sout << F(" Matches: ") << successes << F(", Failures: ") << failures << F(", False Positives: ") << falsePositives << '\n';
 }
 
 void printSuccessFailureErrs() {
-  Serial.print(F(" new SuccessErr/FailureErr "));
-  Serial.print(successErr);
-  Serial.print(F("/"));
-  Serial.println(failureErr);
+  sout << F(" new SuccessErr: ") << successErr << F(", new FailureErr: ") << failureErr << '\n';
 }
 
 #ifdef DEBUG
