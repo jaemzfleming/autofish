@@ -54,6 +54,7 @@ struct PatternMatcher {
 
   void clear() {
     numPatterns = 0;
+    threshold = 0;
   }
 
   void startSampling() {
@@ -71,28 +72,29 @@ struct PatternMatcher {
       currentSample = 0;
       ++currentElement;
       if (currentElement == numElements) {
-        // we are done!  Find the max, normalize, etc.
-        int maxVal = 0;
-        for (int i = 0; i < numElements; ++i) {
-          maxVal = max(maxVal, currentPattern[i]);
-        }
-
-        float squaredErr = 0;
-
+        lastErr = 0;
         Serial.print(" current: ");
         for (int i = 0; i < numElements; ++i) {
-          float tmp = float(currentPattern[i]) / float(maxVal);
-          float err = tmp - pattern[i];
-          squaredErr += err * err;
-          Serial.print(tmp);
+          currentPattern[i] /= samplesPerElement;
+          float err = float(currentPattern[i]) - pattern[i];
+          lastErr += err * err;
+          Serial.print(currentPattern[i]);
           Serial.print(F(", "));
         }
-        squaredErr /= numElements;
-        Serial.println("");
-        Serial.print(" squared error: ");
-        Serial.println(squaredErr);
+        lastErr /= numElements;
+        lastErr = sqrt(lastErr);
 
-        success = squaredErr < threshold;
+        success = training || (lastErr < threshold);
+
+        if (success) {
+          Serial.print(F("  Success: "));
+        } else {
+          Serial.print(F("  Failure: "));
+        }
+        Serial.print(lastErr);
+        Serial.print(F(" < "));
+        Serial.println(threshold);
+
         return true;
 
       } else {
@@ -106,13 +108,9 @@ struct PatternMatcher {
 
   // current pattern is good, integrate it.
   void integratePattern() {
-    // we are done!  Find the max, normalize, etc.
-    int maxVal = 0;
+    // we are done!
     for (int i = 0; i < numElements; ++i) {
-      maxVal = max(maxVal, currentPattern[i]);
-    }
-    for (int i = 0; i < numElements; ++i) {
-      float tmp = float(currentPattern[i]) / float(maxVal);
+      float tmp = float(currentPattern[i]);
       pattern[i] = (pattern[i] * numPatterns + tmp) / (numPatterns + 1);
     }
     // print the new pattern.
@@ -129,6 +127,8 @@ struct PatternMatcher {
 
   bool success = false;
 
+  float lastErr = 0;
+
   // current pattern sample.
   int currentSample = 0;
 
@@ -143,17 +143,25 @@ struct PatternMatcher {
   int currentElement = 0;  // which element we are adding to currently.
   // for matching, during training, starts high.
   float threshold = 1;
+  bool training = false;
 };
 
 
 PatternMatcher pattern;
 
-long sampleTimeout = 10;
-long failures = 0;
+float successErr = 0;  // filtered.
+float failureErr = 0;  // filtered.
+
 long successes = 0;
+long failures = 0;
+
+// during training, every 5 bumps up the initial threshold.
+int falsePositiveStreak = 0;
+
+long sampleTimeout = 10;
 float preLookVal = 0;  // before we fished.
-bool paused = false;
-bool training = false;
+// we'll keep raising this until we get a true value.
+float initialThreshold = 50;
 
 void loop() {
 
@@ -162,22 +170,28 @@ void loop() {
 
   //  Serial.println(analogRead(opticalPin));
   if (digitalRead(pausePin) == 0) {
+    //Serial.println(analogRead(opticalPin));
     delay(1000);
     return;
   }
 
   bool t = digitalRead(trainingPin) == 0;
-  if (t != training) {
+  if (t != pattern.training) {
     if (t) {
       Serial.println(F("Start Training"));
       pattern.clear();
-      pattern.threshold = 1.0f;
+      initialThreshold = 50;
+      successErr = 0;
+      failureErr = 0;
     } else {
-      Serial.println(F("End Training"));
+      Serial.print(F("End Training, thresh: "));
       // todo determine, maybe by keeping some filtered versions.
-      pattern.threshold = .03f;
+      pattern.threshold = (successErr + failureErr) / 2.0f;
+      Serial.println(pattern.threshold);
+      successes = 0;
+      failures = 0;
     }
-    training = t;
+    pattern.training = t;
   }
 
   envelope = max(envelope * .99, abs(val));
@@ -210,7 +224,7 @@ void loop() {
     switch (state) {
       case State::LISTENING:
         {
-          if (abs(val) > 50) {
+          if (abs(val) > initialThreshold) {
             //    Serial.print(F("now"));
             //Serial.println(val);
             state = State::TRACKING;
@@ -223,26 +237,24 @@ void loop() {
           // returns true when finished.
           if (pattern.addSample(envelope)) {
             if (pattern.success) {
-              Serial.println(" Success!");
               ++successes;
               state = State::PRE_LOOK;
-              sampleTimeout = 2000;  // wait a quarter second before reeling in.
+              sampleTimeout = 1;  // wait a quarter second before reeling in.
             } else {
               ++failures;
-              Serial.println(F(" Failed!!!"));
               state = State::LISTENING;
               sampleTimeout = 4000;  // wait a second.
             }
-            printSuccesses();
+            if (!pattern.training) {
+              printSuccesses();
+            }
           }
           break;
         }
       case State::PRE_LOOK:
         {
           preLookVal = analogRead(opticalPin);
-          Serial.print(F(" preLookVal: "));
-          Serial.println(preLookVal);
-          sampleTimeout = 1;
+          sampleTimeout = 500;
           state = State::REELING_IN;
           break;
         }
@@ -256,25 +268,60 @@ void loop() {
       case State::POST_LOOK:
         {
           float postLookVal = analogRead(opticalPin);
-          Serial.print(F("postLookVal: "));
+          Serial.print(F(" pre/postLookVal: "));
+          Serial.print(preLookVal);
+          Serial.print(F("/"));
           Serial.println(postLookVal);
           sampleTimeout = 1;  // wait a second before casting.
 
-          // if 10% higher.8k9
-          if (postLookVal > preLookVal * 1.15f) {
+          // if 50% higher.8k9.  I know, it's rash but it gets bright.
+          if (postLookVal > preLookVal * 1.3f && postLookVal > 20) {
             state = State::DISCARD;
-            if (training) {
+            if (pattern.training) {
               Serial.println(" Integrating pattern");
               pattern.integratePattern();
+              Serial.print(F(" lastErr and old successErr "));
+              Serial.print(pattern.lastErr);
+              Serial.print(" ");
+              Serial.println(successErr);
+              // need at least one already.
+              if (pattern.numPatterns > 1) {
+                successErr = (successErr == 0) ? pattern.lastErr : (successErr * .9f + pattern.lastErr * .1f);
+                printSuccessFailureErrs();
+              }
+              falsePositiveStreak = 0;
             }
           } else {
-            state = State::CASTING;
-            if (training) {
+            state = State::DISCARD;
+            if (pattern.training) {
               Serial.println(" Discarding pattern");
+              Serial.print(F(" lastErr and old failureErr and FPS "));
+              Serial.print(pattern.lastErr);
+              Serial.print(" ");
+              Serial.println(failureErr);
+              Serial.print(" ");
+              Serial.println(falsePositiveStreak);
+
+              if (pattern.numPatterns > 0) {
+                failureErr = (failureErr == 0) ? pattern.lastErr : (failureErr * .9f + pattern.lastErr * .1f);
+                printSuccessFailureErrs();
+
+                if (++falsePositiveStreak >= 5) {
+                  falsePositiveStreak = 0;
+                  initialThreshold *= 1.1f;
+                  Serial.print(F(" Init threshold now "));
+                  Serial.println(initialThreshold);
+                }
+              }
+
+              if (pattern.numPatterns == 0) {
+                initialThreshold *= 1.1f;
+                Serial.print(F(" Init threshold now "));
+                Serial.println(initialThreshold);
+              }
             }
             // TODO note that it was a failure, and we don't have to discard anything.
           }
-
           break;
         }
       case State::DISCARD:
@@ -292,14 +339,6 @@ void loop() {
         }
       case State::CASTING:
         {
-          // We'll roll discard in for now.
-          Keyboard.write('8');
-          delay(200);
-          Keyboard.write('k');
-          delay(200);
-          Keyboard.write('9');
-          delay(200);
-
           Mouse.click(MOUSE_RIGHT);
           sampleTimeout = 16000;  // wait a second before listening.
           state = State::LISTENING;
@@ -335,13 +374,18 @@ void loop() {
 }
 
 void printSuccesses() {
-  Serial.print(F("Successes/Failures: "));
+  Serial.print(F(" Successes/Failures: "));
   Serial.print(successes);
   Serial.print(F("/"));
   Serial.println(failures);
 }
 
-
+void printSuccessFailureErrs() {
+  Serial.print(F(" new SuccessErr/FailureErr "));
+  Serial.print(successErr);
+  Serial.print(F("/"));
+  Serial.println(failureErr);
+}
 
 #ifdef DEBUG
 void writeBuffer() {
