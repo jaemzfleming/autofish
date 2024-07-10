@@ -275,16 +275,14 @@ struct KMeans {
   void compute() {
     // Pick initial four seeds but don't reuse them.
     // Each is the greatest summed squared err from all the previous.
-
-    for (auto s : samples) {
+    for (auto& s : samples) {
       s.patternIndex = -1;
-      s.minSquaredError = -2;
+      s.minSquaredError = -2.0f;
     }
-
     // @TEST
     for (int i = 0; i < numSamples; ++i) {
       Sample& s = samples[i];
-      sout << " sample " << i << " index" << s.patternIndex << " err " << s.minSquaredError << '\n';
+      sout << F(" sample ") << i << F(", index: ") << s.patternIndex << F(", err: ") << s.minSquaredError << '\n';
     }
 
     for (int destPattern = 0; destPattern < K; ++destPattern) {
@@ -828,13 +826,13 @@ void writeInt(int val, int decimal) {
   // and write it out backwards.
   while (--index >= 0) {
     Keyboard.write(buffer[index]);
-    if (--decimal == 0) {
+    if (index == decimal) {
       Keyboard.write('.');
     }
   }
 }
 void writeFloat(float f) {
-  writeInt(static_cast<int>(f * 100.0f + .5f), 2);
+  writeInt(static_cast<int>(f * 100.0f), 2);
 }
 
 
