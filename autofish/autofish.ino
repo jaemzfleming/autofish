@@ -251,16 +251,16 @@ struct KMeans {
       float err = float(src[i]) - pattern[i];
       err2 += err * err;
     }
-    sout << "   computed squared error is " << err2 << "\n";
     err2 /= PatternMatcher::numElements;
-    sout << "   computed squared error per element is " << err2 << "\n";
 
     return err2;
   }
 
   // Computes the best fit for this sample, including setting min error and best pattern index
-  void findBestFit(Sample& s) {
+  // returns true if the best fit changed.
+  bool findBestFit(Sample& s) const {
     s.minSquaredError = squaredError(s.samples, patterns[0].pattern);
+    int8_t oldPatternIndex = s.patternIndex;
     s.patternIndex = 0;
     for (int p = 1; p < K; ++p) {
       float err = squaredError(s.samples, patterns[p].pattern);
@@ -269,6 +269,7 @@ struct KMeans {
         s.patternIndex = p;
       }
     }
+    return s.patternIndex != oldPatternIndex;
   }
 
   // do the k means.
@@ -279,10 +280,12 @@ struct KMeans {
       s.patternIndex = -1;
       s.minSquaredError = -2.0f;
     }
-    // @TEST
-    for (int i = 0; i < numSamples; ++i) {
+    // @HACK cheat and make every other first half higher.
+    for (int i = 0; i < numSamples; i += 2) {
       Sample& s = samples[i];
-      sout << F(" sample ") << i << F(", index: ") << s.patternIndex << F(", err: ") << s.minSquaredError << '\n';
+      for (auto& e : s.samples) {
+        e += 20;
+      }
     }
 
     for (int destPattern = 0; destPattern < K; ++destPattern) {
@@ -313,23 +316,35 @@ struct KMeans {
       patterns[destPattern].integrateInto(s.samples);
       s.patternIndex = destPattern;
       s.minSquaredError = maxErr;
-
-      // @TEST quit after one, so we can see which one was used.
-      if (destPattern == 1) {
-        return;
-      }
     }
 
-    // while in a loop, maybe only do it while max error decreases?
-    // or 16 steps, whichever comes first.
+    // force them to mark changed for the first time
+    for (auto& s : samples) {
+      s.patternIndex = -1;
+    }
+
+    int steps = 0;
+    bool changed = false;
     do {
 
+      sout << F("Doing an average\n");
+      changed = false;
       // For each sample find the closest match
       // and mark it
       for (auto& s : samples) {
-        findBestFit(s);
+        changed |= findBestFit(s);
       }
-    } while (false);
+
+      for (auto& p : patterns) {
+        p.count = 0;
+      }
+
+      // And average them into it, noting if any changed.
+      for (auto& s : samples) {
+        patterns[s.patternIndex].integrateInto(s.samples);
+      }
+
+    } while (changed && ++steps < 16);
   }
 
   void write() const {
@@ -414,9 +429,9 @@ struct KMeans {
   }
 
 
-  static const uint8_t numSamples = 4;  // for kmeans. (32 not enough)
-  static const uint8_t K = 4;
-  uint8_t index = 0;  // for counting.
+  static const uint8_t numSamples = 8;  // for kmeans. (32 not enough)
+  static const uint8_t K = 2;           // should be four, but 2 for now.
+  uint8_t index = 0;                    // for counting.
 
   Sample samples[numSamples];
 
