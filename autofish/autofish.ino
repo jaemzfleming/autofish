@@ -11,17 +11,35 @@ int outputPin = 7;    // set high to dump envelopes to spreadsheet
 int audioPin = A0;
 int opticalPin = A1;
 
+void writeInt(int val, int decimal = 0);
+void writeFloat(float f);
+
 enum class State {
   LISTENING,
   TRACKING,
   PRE_LOOK,
   REELING_IN,
   POST_LOOK,
-  DISCARD,
+  DROP,
   CASTING,
 };
 
 State state = State::LISTENING;
+
+struct SW {
+  static const char* RED;
+  static const char* GREEN;
+  static const char* YELLOW;
+  static const char* BLUE;
+  static const char* DEF;
+  static const char* CLS;
+};
+const char* SW::RED = "\033[31m";
+const char* SW::GREEN = "\033[32m";
+const char* SW::YELLOW = "\033[33m";
+const char* SW::BLUE = "\033[34m";
+const char* SW::DEF = "\033[0m";
+const char* SW::CLS = "\033[2J\033[H";
 
 class SerialWrapper {
 public:
@@ -64,6 +82,14 @@ void setup() {
   pinMode(pausePin, INPUT);     // Set the button as an input
   pinMode(trainingPin, INPUT);  // Set the button as an input
   pinMode(outputPin, INPUT);    // Set the button as an input
+
+  /*
+  // TEST
+  Serial.print("\033[31mRed Text\033[0m\n");
+  Serial.print("\033[32mGreen Text\033[0m\n");
+  Serial.print("\033[33mYellow Text\033[0m\n");
+  Serial.print("\033[34mBlue Text\033[0m\n");
+  */
 }
 
 
@@ -175,8 +201,8 @@ struct KMeans {
 
   struct Sample {
     uint8_t samples[PatternMatcher::numElements];
-    uint8_t patternIndex = 0;  // in the patterns.
-    float minSquaredError;     // the minimum err squared for this pattern.
+    int8_t patternIndex = -1;    // in the patterns.
+    float minSquaredError = -1;  // the minimum err squared for this pattern.
   };
 
   struct Pattern {
@@ -203,6 +229,7 @@ struct KMeans {
       ++index;
       sout << F("  KMeans copying ") << index << '/' << numSamples << F(" pattern\n");
       if (index == numSamples) {
+        sout << "COMPUTING!!!\n";
         compute();
       }
 
@@ -224,7 +251,11 @@ struct KMeans {
       float err = float(src[i]) - pattern[i];
       err2 += err * err;
     }
-    return err2 / PatternMatcher::numElements;
+    sout << "   computed squared error is " << err2 << "\n";
+    err2 /= PatternMatcher::numElements;
+    sout << "   computed squared error per element is " << err2 << "\n";
+
+    return err2;
   }
 
   // Computes the best fit for this sample, including setting min error and best pattern index
@@ -242,23 +273,53 @@ struct KMeans {
 
   // do the k means.
   void compute() {
-    // Pick initial four seeds.
+    // Pick initial four seeds but don't reuse them.
     // Each is the greatest summed squared err from all the previous.
+
+    for (auto s : samples) {
+      s.patternIndex = -1;
+      s.minSquaredError = -2;
+    }
+
+    // @TEST
+    for (int i = 0; i < numSamples; ++i) {
+      Sample& s = samples[i];
+      sout << " sample " << i << " index" << s.patternIndex << " err " << s.minSquaredError << '\n';
+    }
+
     for (int destPattern = 0; destPattern < K; ++destPattern) {
+      sout << "dest pattern =" << destPattern << '\n';
       float maxErr = -1;
       int worstSample = 0;
       for (int i = 0; i < numSamples; ++i) {
+        Sample& s = samples[i];
+        // skip used ones.
+        if (s.patternIndex != -1) {
+          sout << "skipping sample " << i << ", used\n";
+          continue;
+        }
         float err = 0;
         for (int p = 0; p < destPattern; ++p) {
-          err += squaredError(samples[i].samples, patterns[p].pattern);
+          err += squaredError(s.samples, patterns[p].pattern);
         }
+        sout << "err for sample " << i << " is " << err << '\n';
         if (err > maxErr) {
           maxErr = err;
           worstSample = i;
+          sout << "is worst than max, setting worst\n";
         }
       }
+      auto& s = samples[worstSample];
+      sout << "worst was " << worstSample << "\n";
       patterns[destPattern].count = 0;
-      patterns[destPattern].integrateInto(samples[worstSample].samples);
+      patterns[destPattern].integrateInto(s.samples);
+      s.patternIndex = destPattern;
+      s.minSquaredError = maxErr;
+
+      // @TEST quit after one, so we can see which one was used.
+      if (destPattern == 1) {
+        return;
+      }
     }
 
     // while in a loop, maybe only do it while max error decreases?
@@ -277,17 +338,13 @@ struct KMeans {
 
     // Row 0: The Legend row,
     Keyboard.print(F("index"));
-    delay(10);
-    Keyboard.write(KEY_RIGHT_ARROW);
-    delay(10);
+    writeNextCol();
 
     // Normal samples.
     for (int i = 0; i < index; ++i) {
       Keyboard.print(F("env"));
       Keyboard.print(i);
-      delay(10);
-      Keyboard.write(KEY_RIGHT_ARROW);
-      delay(10);
+      writeNextCol();
     }
 
     // patterns last if set.
@@ -295,54 +352,71 @@ struct KMeans {
       if (patterns[i].count > 0) {
         Keyboard.print(F("pat"));
         Keyboard.print(i);
-        delay(10);
-        Keyboard.write(KEY_RIGHT_ARROW);
-        delay(10);
+        writeNextCol();
       }
     }
+    writeNextRow();
 
-    // Down to Row1
-    Keyboard.write(KEY_DOWN_ARROW);
-    delay(10);
-    Keyboard.write(KEY_HOME);
-    delay(10);
-
-    // All the other rows.  Final is fake row, shows which pattern.
-    for (int element = 0; element <= PatternMatcher::numElements; ++element) {
+    // All the other rows.  Final two are fake row, shows which pattern.
+    for (int element = 0; element <= PatternMatcher::numElements + 1; ++element) {
 
       bool patternRow = (element == PatternMatcher::numElements);
+      bool errRow = (element == PatternMatcher::numElements + 1);
+
+      if (errRow) {
+        // skip a row, data, not part of graph.
+        writeNextRow();
+      }
 
       Keyboard.print(element);
-      delay(10);
-      Keyboard.write(KEY_RIGHT_ARROW);
-      delay(10);
+      writeNextCol();
 
-      for (int i = 0; i < index; ++i) {
-        writeInt(patternRow ? samples[i].patternIndex : samples[i].samples[element]);
-        delay(10);
-        Keyboard.write(KEY_RIGHT_ARROW);
-        delay(10);
+      for (auto& s : samples) {
+        if (errRow) {
+          writeFloat(s.minSquaredError);
+        } else if (patternRow) {
+          writeInt(s.patternIndex * 25);
+        } else {
+          writeInt(s.samples[element]);
+        }
+        writeNextCol();
       }
 
       // patterns last if set.
       for (int i = 0; i < K; ++i) {
+
         if (patterns[i].count > 0) {
-          // round.
-          writeInt(patternRow ? i : static_cast<uint8_t>(patterns[i].pattern[element] + .5f));
-          delay(10);
-          Keyboard.write(KEY_RIGHT_ARROW);
-          delay(10);
+          if (errRow) {
+            writeFloat(0);  // no errror.
+          } else if (patternRow) {
+            writeInt(i * 25);
+          } else {
+            writeFloat(patterns[i].pattern[element]);
+          }
+          writeNextCol();
         }
       }
       // Next row.
-      Keyboard.write(KEY_DOWN_ARROW);
-      delay(10);
-      Keyboard.write(KEY_HOME);
-      delay(10);
+      writeNextRow();
     }
   }
 
-  static const uint8_t numSamples = 32;  // for kmeans.
+  void writeNextRow() {
+    // Next row.
+    Keyboard.write(KEY_DOWN_ARROW);
+    delay(10);
+    Keyboard.write(KEY_HOME);
+    delay(10);
+  }
+
+  void writeNextCol() {
+    delay(10);
+    Keyboard.write(KEY_RIGHT_ARROW);
+    delay(10);
+  }
+
+
+  static const uint8_t numSamples = 4;  // for kmeans. (32 not enough)
   static const uint8_t K = 4;
   uint8_t index = 0;  // for counting.
 
@@ -358,9 +432,11 @@ KMeans kmeans;
 
 PatternMatcher pattern;
 
+// these should go into the class.
 float successErr = 0;  // filtered.
 float failureErr = 0;  // filtered.
 
+// so should this.
 long successes = 0;
 long failures = 0;
 long falsePositives = 0;
@@ -402,7 +478,7 @@ void loop() {
   if (digitalRead(trainingPin) != pattern.training) {
     pattern.training = !pattern.training;
     if (pattern.training) {
-      sout << F("START TRAINING\n");
+      sout << SW::CLS << F("START TRAINING\n");
       pattern.clear();
       initialThreshold = 50;
       successErr = 0;
@@ -425,6 +501,7 @@ void loop() {
     if (sampleTimeout > 0) {
       --sampleTimeout;
       if (sampleTimeout == 0) {
+        sout << SW::BLUE;
         switch (state) {
           case State::LISTENING:
             sout << F("LISTENING...\n");
@@ -438,13 +515,14 @@ void loop() {
           case State::POST_LOOK:
             sout << F("POST LOOK\n");
             break;
-          case State::DISCARD:
-            sout << F("DISCARD\n");
+          case State::DROP:
+            sout << F("DROP\n");
             break;
           case State::CASTING:
             sout << F("CASTING\n");
             break;
         }
+        sout << SW::DEF;
       }
     } else {
       switch (state) {
@@ -509,13 +587,19 @@ void loop() {
               ++falsePositives;
             }
 
-            sout << ' ' << (present ? F("Present! ") : F("Not Present! ")) << F("Pre: ") << preLookVal << F(", Post: ") << postLookVal << '\n';
+            if (present) {
+              sout << SW::GREEN << F(" Present! ");
+            } else {
+              sout << SW::RED << F(" Not Present! ");
+            }
+
+            sout << F("Pre: ") << preLookVal << F(", Post: ") << postLookVal << SW::DEF << '\n';
 
             // if 50% higher.8k9.  I know, it's rash but it gets bright.
             if (present) {
-              state = State::DISCARD;
+              state = State::DROP;
               if (pattern.training) {
-                sout << F("  Integrating");
+                sout << SW::GREEN << F("  Integrating") << SW::DEF;
                 pattern.integratePattern();
                 sout << F("  lastErr: ") << pattern.lastErr << F(", old successErr: ") << successErr << '\n';
                 // need at least one already.
@@ -525,17 +609,15 @@ void loop() {
                 }
                 falsePositiveStreak = 0;
 
-#ifdef DEBUG2
                 if (pattern.training) {
                   // copy to tthe debug patterns
                   kmeans.addPattern(pattern.currentPattern);
                 }
-#endif
               }
             } else {
-              state = State::DISCARD;
+              state = State::DROP;
               if (pattern.training) {
-                sout << F("  Discarding pattern\n");
+                sout << SW::RED << F("  Discarding pattern\n") << SW::DEF;
                 sout << F("  lastErr: ") << pattern.lastErr << F(", old failureErr: ") << failureErr << F(", FP Streak: ") << falsePositiveStreak << '\n';
 
                 if (pattern.numPatterns > 0) {
@@ -558,7 +640,7 @@ void loop() {
             }
             break;
           }
-        case State::DISCARD:
+        case State::DROP:
           {
             // We'll roll discard in for now.
             Keyboard.write('8');
@@ -584,12 +666,10 @@ void loop() {
   }
 
 
-#ifdef DEBUG2
   if (pattern.training && digitalRead(outputPin)) {
     kmeans.write();
     delay(4000);
   }
-#endif
 
 #ifdef DEBUG
   //  Serial.println(abs(val));
@@ -696,8 +776,6 @@ void writeEnvelopeChunksOf64() {
   }
 }
 
-
-
 void writeChunksOf64() {
 
   int chunk = 0;
@@ -734,7 +812,8 @@ void writeChunksOf64() {
 #endif
 
 #if defined(DEBUG) || defined(DEBUG2)
-void writeInt(int val) {
+
+void writeInt(int val, int decimal) {
   if (val < 0) {
     Keyboard.write('-');
     val = -val;
@@ -749,6 +828,14 @@ void writeInt(int val) {
   // and write it out backwards.
   while (--index >= 0) {
     Keyboard.write(buffer[index]);
+    if (--decimal == 0) {
+      Keyboard.write('.');
+    }
   }
 }
+void writeFloat(float f) {
+  writeInt(static_cast<int>(f * 100.0f + .5f), 2);
+}
+
+
 #endif
