@@ -284,6 +284,10 @@ struct KMeans {
     return sampleIndex < numSamples;
   }
 
+  bool hasValidSamples() const {
+    return sampleIndex > 0;
+  }
+
   // Add a pattern if we can, returns true when finished.
   void addSample(const uint8_t sample[numElements]) {
     if (sampleIndex < numSamples) {
@@ -505,10 +509,11 @@ struct KMeans {
     delay(10);
   }
 
-  uint8_t sampleIndex = 0;  // for counting.
-
-  // maybe this should be split off, since it's really temporary and all we really need in the end is the pattern.
+  // the samples.
   Sample samples[numSamples];
+
+protected:
+  uint8_t sampleIndex = 0;  // for counting.
 };
 
 KMeans kmeans;
@@ -719,7 +724,7 @@ void loop() {
                 sout << F("  False positive streak: ") << falsePositiveStreak << '\n';
 
                 // if no valid samples yet.
-                if (kmeans.sampleIndex == 0 || ++falsePositiveStreak >= 5) {
+                if (!kmeans.hasValidSamples() || ++falsePositiveStreak >= 5) {
                   falsePositiveStreak = 0;
                   initialThreshold *= 1.1f;
                   sout << F("  Init threshold now ") << initialThreshold << '\n';
