@@ -141,14 +141,14 @@ struct AccumulatingBuffer {
   }
   // Adds a sample, returns true when finished.
   bool addSubElement(int value) {
-    buffer[currentElement] += abs(value);
+    data[currentElement] += abs(value);
     ++currentSample;
     if (currentSample == samplesPerElement) {
       currentSample = 0;
       ++currentElement;
       if (currentElement == numElements) {
         for (int i = 0; i < numElements; ++i) {
-          buffer[i] /= samplesPerElement;
+          data[i] /= samplesPerElement;
         }
         return true;
       }
@@ -156,13 +156,78 @@ struct AccumulatingBuffer {
     return false;
   }
 
-  int buffer[numElements];
+  int data[numElements];
   int currentElement = 0;
   int currentSample = 0;
 };
 
 AccumulatingBuffer accBuffer;
 
+// Patterns you can match against.
+struct Patterns {
+
+  struct BestFitVal {
+    int index;
+    float errorSquared;
+  };
+
+  static const uint8_t K = 2;  // should be four, but 2 for now.
+
+  struct Pattern {
+    int count = 0;          // how many were averaged into the data.
+    float averageErr = 0;   // non squared, the average err from this pattern once matched.
+    float errVariance = 0;  // what the variance was.
+    float data[numElements];
+
+    // Average us into this.
+    void integrateInto(const uint8_t samples[numElements]) {
+      for (int i = 0; i < numElements; ++i) {
+        data[i] = (data[i] * count + samples[i]) / (count + 1);
+      }
+      ++count;
+    }
+
+    // The squared error against us.
+    float squaredError(const uint8_t src[numElements]) const {
+      float err2 = 0;
+      for (int i = 0; i < numElements; ++i) {
+        float err = float(src[i]) - data[i];
+        err2 += err * err;
+      }
+      err2 /= numElements;
+
+      return err2;
+    }
+  };
+
+  void resetCounts() {
+    for (auto& p : patterns) {
+      p.count = 0;
+    }
+  }
+
+  // Finds the least squared error.  Returning index and error.
+  BestFitVal findClosest(const uint8_t src[numElements]) const {
+    float minErr = patterns[0].squaredError(src);
+    int bestIndex = 0;
+    for (int p = 1; p < K; ++p) {
+      float err = patterns[p].squaredError(src);
+      if (err < minErr) {
+        minErr = err;
+        bestIndex = p;
+      }
+    }
+    return { bestIndex, minErr };
+  }
+
+
+
+  // and K patterns since it's k means and all.   Maybe we could/should keep these separate
+  // from the samples.
+  Pattern patterns[K];
+};
+
+Patterns patterns;
 
 // Start doing kmeans.
 struct KMeans {
@@ -171,19 +236,6 @@ struct KMeans {
     uint8_t samples[numElements];
     int8_t patternIndex = -1;    // in the patterns.
     float minSquaredError = -1;  // the minimum err squared for this pattern.
-  };
-
-  struct Pattern {
-    float pattern[numElements];
-    uint8_t count = 0;  // how many were averaged into here.
-
-    // Average us into this.
-    void integrateInto(const uint8_t samples[numElements]) {
-      for (int i = 0; i < numElements; ++i) {
-        pattern[i] = (pattern[i] * count + samples[i]) / (count + 1);
-      }
-      ++count;
-    }
   };
 
   void startTraining() {
@@ -216,31 +268,13 @@ struct KMeans {
     }
   }
 
-  // once we get going..
-  float squaredError(const uint8_t src[numElements], const float pattern[numElements]) const {
-    float err2 = 0;
-    for (int i = 0; i < numElements; ++i) {
-      float err = float(src[i]) - pattern[i];
-      err2 += err * err;
-    }
-    err2 /= numElements;
-
-    return err2;
-  }
-
   // Computes the best fit for this sample, including setting min error and best pattern index
   // returns true if the best fit changed.
   bool findBestFit(Sample& s) const {
-    s.minSquaredError = squaredError(s.samples, patterns[0].pattern);
     int8_t oldPatternIndex = s.patternIndex;
-    s.patternIndex = 0;
-    for (int p = 1; p < K; ++p) {
-      float err = squaredError(s.samples, patterns[p].pattern);
-      if (err < s.minSquaredError) {
-        s.minSquaredError = err;
-        s.patternIndex = p;
-      }
-    }
+    auto val = patterns.findClosest(s.samples);
+    s.patternIndex = val.index;
+    s.minSquaredError = val.errorSquared;
     return s.patternIndex != oldPatternIndex;
   }
 
@@ -260,7 +294,7 @@ struct KMeans {
       }
     }
 
-    for (int destPattern = 0; destPattern < K; ++destPattern) {
+    for (int destPattern = 0; destPattern < Patterns::K; ++destPattern) {
       sout << "dest pattern =" << destPattern << '\n';
       float maxErr = -1;
       int worstSample = 0;
@@ -273,7 +307,7 @@ struct KMeans {
         }
         float err = 0;
         for (int p = 0; p < destPattern; ++p) {
-          err += squaredError(s.samples, patterns[p].pattern);
+          err += patterns.patterns[p].squaredError(s.samples);
         }
         sout << "err for sample " << i << " is " << err << '\n';
         if (err > maxErr) {
@@ -284,8 +318,8 @@ struct KMeans {
       }
       auto& s = samples[worstSample];
       sout << "worst was " << worstSample << "\n";
-      patterns[destPattern].count = 0;
-      patterns[destPattern].integrateInto(s.samples);
+      patterns.patterns[destPattern].count = 0;
+      patterns.patterns[destPattern].integrateInto(s.samples);
       s.patternIndex = destPattern;
       s.minSquaredError = maxErr;
     }
@@ -302,18 +336,16 @@ struct KMeans {
       sout << F("Doing an average\n");
       changed = false;
       // For each sample find the closest match
-      // and mark it
+      // and mark it, noting if any changed.
       for (auto& s : samples) {
         changed |= findBestFit(s);
       }
 
-      for (auto& p : patterns) {
-        p.count = 0;
-      }
+      patterns.resetCounts();
 
-      // And average them into it, noting if any changed.
+      // Average the samples into the patterns
       for (auto& s : samples) {
-        patterns[s.patternIndex].integrateInto(s.samples);
+        patterns.patterns[s.patternIndex].integrateInto(s.samples);
       }
 
     } while (changed && ++steps < 16);
@@ -333,8 +365,8 @@ struct KMeans {
     }
 
     // patterns last if set.
-    for (int i = 0; i < K; ++i) {
-      if (patterns[i].count > 0) {
+    for (int i = 0; i < Patterns::K; ++i) {
+      if (patterns.patterns[i].count > 0) {
         Keyboard.print(F("pat"));
         Keyboard.print(i);
         writeNextCol();
@@ -368,15 +400,15 @@ struct KMeans {
       }
 
       // patterns last if set.
-      for (int i = 0; i < K; ++i) {
-
-        if (patterns[i].count > 0) {
+      for (int i = 0; i < Patterns::K; ++i) {
+        const auto& p = patterns.patterns[i];
+        if (p.count > 0) {
           if (errRow) {
             writeFloat(0);  // no errror.
           } else if (patternRow) {
             writeInt(i * 25);
           } else {
-            writeFloat(patterns[i].pattern[element]);
+            writeFloat(p.data[element]);
           }
           writeNextCol();
         }
@@ -401,16 +433,10 @@ struct KMeans {
   }
 
   static const uint8_t numSamples = 8;  // for kmeans. (32 not enough)
-  static const uint8_t K = 2;           // should be four, but 2 for now.
   uint8_t sampleIndex = 0;              // for counting.
-  uint8_t elementIndex = 0;             // while accumulating.
 
   // maybe this should be split off, since it's really temporary and all we really need in the end is the pattern.
   Sample samples[numSamples];
-
-  // and K patterns since it's k means and all.   Maybe we could/should keep these separate
-  // from the samples.
-  Pattern patterns[K];
 };
 
 KMeans kmeans;
@@ -517,7 +543,7 @@ void loop() {
               if (kmeans.isTraining()) {
                 state = State::PRE_LOOK;
                 sampleTimeout = 1;  // wait a quarter second before reeling in.
-                sout << F("  ") << accBuffer.buffer << '\n';
+                sout << F("  ") << accBuffer.data << '\n';
               } else {
                 // TODO Score it, etc.
                 bool success = false;
@@ -574,7 +600,7 @@ void loop() {
                 // reset the false positive stream.
                 falsePositiveStreak = 0;
                 // add a new sample for kmeans.
-                kmeans.addSample(accBuffer.buffer);
+                kmeans.addSample(accBuffer.data);
                 // not present.
               } else {
                 sout << SW::RED << F("  Discarding pattern\n") << SW::DEF;
