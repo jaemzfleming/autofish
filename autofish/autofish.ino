@@ -20,6 +20,7 @@ enum class State {
   PRE_LOOK,
   REELING_IN,
   POST_LOOK,
+  CHECK_FALSE_NEGATIVE,
   DROP,
   CASTING,
 };
@@ -179,7 +180,7 @@ struct Patterns {
     float errorSquared;
   };
 
-  static const uint8_t K = 2;  // should be four, but 2 for now.
+  static const uint8_t K = 4;  // should be four, but 2 for now.
 
   struct Pattern {
     int count = 0;         // how many were averaged into the data.
@@ -212,7 +213,7 @@ struct Patterns {
     for (auto& p : patterns) {
       p.count = 0;
     }
-  }
+  };
 
   // Finds the least squared error.  Returning index and error.
   BestFitVal findClosest(const uint8_t src[numElements]) const {
@@ -267,7 +268,7 @@ Patterns patterns;
 // Start doing kmeans.
 struct KMeans {
 
-  static const uint8_t numSamples = 16;  // for kmeans. (32 not enough)
+  static const uint8_t numSamples = 64;  // for kmeans. (32 not enough)
 
   struct Sample {
     uint8_t samples[numElements];
@@ -283,7 +284,7 @@ struct KMeans {
     return sampleIndex < numSamples;
   }
 
-  // Add a pattern if we can.
+  // Add a pattern if we can, returns true when finished.
   void addSample(const uint8_t sample[numElements]) {
     if (sampleIndex < numSamples) {
       auto& s = samples[sampleIndex];
@@ -296,7 +297,6 @@ struct KMeans {
         sout << "COMPUTING!!!\n";
         compute();
       }
-
     } else {
       sout << F("  KMeans ") << sampleIndex << F(" ready to write\n");
     }
@@ -319,13 +319,6 @@ struct KMeans {
     for (auto& s : samples) {
       s.patternIndex = -1;
       s.minSquaredError = -2.0f;
-    }
-    // @HACK cheat and make every other first half higher.
-    for (int i = 0; i < numSamples; i += 2) {
-      Sample& s = samples[i];
-      for (auto& e : s.samples) {
-        e += 20;
-      }
     }
 
     for (int destPattern = 0; destPattern < Patterns::K; ++destPattern) {
@@ -464,6 +457,9 @@ struct KMeans {
           case RowType::ERR:
             writeFloat(sqrtf(s.minSquaredError));
             break;
+          case RowType::STDDEV:
+            Keyboard.print(" ");
+            break;
         };
         writeNextCol();
       }
@@ -517,10 +513,27 @@ struct KMeans {
 
 KMeans kmeans;
 
-// When evaluating, what we get.
-long successes = 0;
-long failures = 0;
-long falsePositives = 0;
+// When evaluating matches, what we get.
+struct Stats {
+  int truePositives = 0;
+  int trueNegatives = 0;
+  int falsePositives = 0;
+  int falseNegatives = 0;
+
+  reset() {
+    truePositives = 0;
+    trueNegatives = 0;
+    falsePositives = 0;
+    falseNegatives = 0;
+  }
+
+  void print() {
+    sout << F(" True Positives: ") << truePositives << F(", True Negatives: ") << trueNegatives << F(", False Positives: ") << falsePositives << F(", False Negatives: ") << falsePositives << '\n';
+    sout << F(" FPR: ") << 100.0f * falsePositives / (trueNegatives + falsePositives) << " FNR: " << 100.0f * falsePositives / (trueNegatives + falsePositives) << '\n';
+  }
+};
+
+Stats stats;
 
 // during training, every 5 bumps up the initial threshold.
 int falsePositiveStreak = 0;
@@ -584,6 +597,9 @@ void loop() {
           case State::POST_LOOK:
             sout << F("POST LOOK\n");
             break;
+          case State::CHECK_FALSE_NEGATIVE:
+            sout << F("CHECK FALSE NEGATIVE\n");
+            break;
           case State::DROP:
             sout << F("DROP\n");
             break;
@@ -625,15 +641,21 @@ void loop() {
                 //are we a match?
                 bool success = patterns.isMatch(accBuffer.data);
                 if (success) {
-                  ++successes;
+                  ++stats.truePositives;  // assume true until shown otherwise.
                   state = State::PRE_LOOK;
                   sampleTimeout = 1;  // wait a quarter second before reeling in.
                 } else {
-                  ++failures;
-                  state = State::LISTENING;
-                  sampleTimeout = 4000;  // wait a second.
+                  ++stats.trueNegatives;
+                  // check for false negitaves (todo make a switch.)
+                  bool checkForFalseNegative = true;
+                  if (checkForFalseNegative) {
+                    state = State::CHECK_FALSE_NEGATIVE;
+                    sampleTimeout = 1;
+                  } else {
+                    state = State::LISTENING;
+                    sampleTimeout = 4000;  // wait a second.
+                  }
                 }
-                printStats();
               }
             }
             break;
@@ -652,6 +674,7 @@ void loop() {
             state = State::POST_LOOK;
             break;
           }
+        case State::CHECK_FALSE_NEGATIVE:
         case State::POST_LOOK:
           {
             float postLookVal = analogRead(opticalPin);
@@ -659,8 +682,15 @@ void loop() {
 
             const bool present = (postLookVal > preLookVal * 1.3f && postLookVal > 20);
 
-            if (!kmeans.isTraining() && !present) {
-              ++falsePositives;
+            if (!kmeans.isTraining()) {
+              // this was false, not true.
+              if (!present) {
+                --stats.truePositives;
+                ++stats.falsePositives;
+              } else if (state == State::CHECK_FALSE_NEGATIVE) {
+                --stats.trueNegatives;
+                ++stats.falseNegatives;
+              }
             }
 
             if (present) {
@@ -678,6 +708,11 @@ void loop() {
                 falsePositiveStreak = 0;
                 // add a new sample for kmeans.
                 kmeans.addSample(accBuffer.data);
+
+                // if done, we reset the stats.
+                if (!kmeans.isTraining()) {
+                  stats.reset();
+                }
                 // not present.
               } else {
                 sout << SW::RED << F("  Discarding pattern\n") << SW::DEF;
@@ -747,11 +782,6 @@ void loop() {
     buffer.enable(true);
   }
 #endif
-}
-
-// TODO add false positives, a match but no fish.
-void printStats() {
-  sout << F(" Matches: ") << successes << F(", Failures: ") << failures << F(", False Positives: ") << falsePositives << '\n';
 }
 
 #ifdef DEBUG
