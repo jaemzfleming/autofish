@@ -683,9 +683,15 @@ void loop() {
         case State::POST_LOOK:
           {
             float postLookVal = analogRead(opticalPin);
-            sampleTimeout = 1;
 
             const bool present = (postLookVal > preLookVal * 1.3f && postLookVal > 20);
+
+            if (present) {
+              sout << SW::DARK_GREEN << F(" Present! ");
+            } else {
+              sout << SW::RED << F(" Not Present! ");
+            }
+            sout << F("Pre: ") << preLookVal << F(", Post: ") << postLookVal << SW::DEF << '\n';
 
             if (!kmeans.isTraining()) {
               // this was false, not true.
@@ -696,18 +702,9 @@ void loop() {
                 --stats.trueNegatives;
                 ++stats.falseNegatives;
               }
-            }
+              stats.print();
 
-            if (present) {
-              sout << SW::DARK_GREEN << F(" Present! ");
             } else {
-              sout << SW::RED << F(" Not Present! ");
-            }
-
-            sout << F("Pre: ") << preLookVal << F(", Post: ") << postLookVal << SW::DEF << '\n';
-
-            state = State::DROP;
-            if (kmeans.isTraining()) {
               if (present) {
                 // reset the false positive stream.
                 falsePositiveStreak = 0;
@@ -731,6 +728,10 @@ void loop() {
                 }
               }
             }
+
+            state = State::DROP;
+            sampleTimeout = 1;
+
             break;
           }
         case State::DROP:
