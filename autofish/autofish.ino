@@ -27,17 +27,50 @@ enum class State {
 State state = State::LISTENING;
 
 struct SW {
+  static const char* BLACK;
   static const char* RED;
   static const char* GREEN;
   static const char* YELLOW;
   static const char* BLUE;
+  static const char* MAGENTA;
+  static const char* CYAN;
+  static const char* WHITE;
+
+  static const char* BRIGHT_BLACK;
+  static const char* BRIGHT_RED;
+  static const char* BRIGHT_GREEN;
+  static const char* BRIGHT_YELLOW;
+  static const char* BRIGHT_BLUE;
+  static const char* BRIGHT_MAGENTA;
+  static const char* BRIGHT_CYAN;
+  static const char* BRIGHT_WHITE;
+
+  static const char* DARK_GREEN;
+
   static const char* DEF;
   static const char* CLS;
 };
+
+const char* SW::BLACK = "\033[30m";
 const char* SW::RED = "\033[31m";
 const char* SW::GREEN = "\033[32m";
 const char* SW::YELLOW = "\033[33m";
 const char* SW::BLUE = "\033[34m";
+const char* SW::MAGENTA = "\033[35m";
+const char* SW::CYAN = "\033[36m";
+const char* SW::WHITE = "\033[37m";
+
+const char* SW::BRIGHT_BLACK = "\033[90m";
+const char* SW::BRIGHT_RED = "\033[91m";
+const char* SW::BRIGHT_GREEN = "\033[92m";
+const char* SW::BRIGHT_YELLOW = "\033[93m";
+const char* SW::BRIGHT_BLUE = "\033[94m";
+const char* SW::BRIGHT_MAGENTA = "\033[95m";
+const char* SW::BRIGHT_CYAN = "\033[96m";
+const char* SW::BRIGHT_WHITE = "\033[97m";
+
+const char* SW::DARK_GREEN = "\033[38;5;22m";  // A darker green from the 256 color palette
+
 const char* SW::DEF = "\033[0m";
 const char* SW::CLS = "\033[2J\033[H";
 
@@ -82,14 +115,6 @@ void setup() {
   pinMode(pausePin, INPUT);     // Set the button as an input
   pinMode(trainingPin, INPUT);  // Set the button as an input
   pinMode(outputPin, INPUT);    // Set the button as an input
-
-  /*
-  // TEST
-  Serial.print("\033[31mRed Text\033[0m\n");
-  Serial.print("\033[32mGreen Text\033[0m\n");
-  Serial.print("\033[33mYellow Text\033[0m\n");
-  Serial.print("\033[34mBlue Text\033[0m\n");
-  */
 }
 
 
@@ -104,154 +129,101 @@ unsigned long samples = 0;
 // the current envelope value.
 long envelope = 0;
 
-struct PatternMatcher {
+const int numElements = 16;
 
-  static const int numElements = 16;
+struct AccumulatingBuffer {
+
   static const int samplesPerElement = 64;  // per element.
 
-  PatternMatcher() {
-    for (int i = 0; i < numElements; ++i) {
-      pattern[i] = 0;
-    }
-  }
-
-  void clear() {
-    numPatterns = 0;
-    threshold = 0;
-  }
-
-  void startSampling() {
-    currentSample = 0;
+  void startAccumulating() {
     currentElement = 0;
-    currentPattern[currentElement] = 0;
-    success = false;
+    currentSample = 0;
   }
-
   // Adds a sample, returns true when finished.
-  bool addSample(int value) {
-    currentPattern[currentElement] += abs(value);
+  bool addSubElement(int value) {
+    buffer[currentElement] += abs(value);
     ++currentSample;
     if (currentSample == samplesPerElement) {
       currentSample = 0;
       ++currentElement;
       if (currentElement == numElements) {
-        lastErr = 0;
-
         for (int i = 0; i < numElements; ++i) {
-          currentPattern[i] /= samplesPerElement;
-          float err = float(currentPattern[i]) - pattern[i];
-          lastErr += err * err;
+          buffer[i] /= samplesPerElement;
         }
-        lastErr /= numElements;
-        lastErr = sqrt(lastErr);
-
-        success = training || (lastErr < threshold);
-        if (training) {
-          sout << F(" Done! err: ") << lastErr;
-        } else {
-          sout << (success ? F(" Match: ") : F(" No Match: ")) << lastErr << (success ? F(" < ") : F(" > ")) << threshold;
-        }
-        sout << ' ' << currentPattern << '\n';
-
         return true;
-
-      } else {
-        currentPattern[currentElement] = 0;
       }
     }
-
-    // not done.
     return false;
   }
 
-  // current pattern is good, integrate it.
-  void integratePattern() {
-    // we are done!
-    for (int i = 0; i < numElements; ++i) {
-      pattern[i] = (pattern[i] * numPatterns + currentPattern[i]) / (numPatterns + 1);
-    }
-    // print the new pattern.
-    sout << F(" pattern ") << numPatterns << F(": ") << pattern << '\n';
-    ++numPatterns;
-  }
-
-  bool success = false;
-
-  float lastErr = 0;
-
-  // current pattern sample.
+  int buffer[numElements];
+  int currentElement = 0;
   int currentSample = 0;
-
-  // the current pattern we are gathering.  We match them all.
-  // before deciding.
-  int currentPattern[numElements];
-  // the averaged pattern.
-  float pattern[numElements];
-  // how many so far, need for adding into.
-  int numPatterns = 0;
-  // if squared error beats this, then we do it.
-  int currentElement = 0;  // which element we are adding to currently.
-  // for matching, must be less to pass.
-  float threshold = 0;
-  bool training = false;
 };
+
+AccumulatingBuffer accBuffer;
+
 
 // Start doing kmeans.
 struct KMeans {
 
   struct Sample {
-    uint8_t samples[PatternMatcher::numElements];
+    uint8_t samples[numElements];
     int8_t patternIndex = -1;    // in the patterns.
     float minSquaredError = -1;  // the minimum err squared for this pattern.
   };
 
   struct Pattern {
-    float pattern[PatternMatcher::numElements];
+    float pattern[numElements];
     uint8_t count = 0;  // how many were averaged into here.
 
     // Average us into this.
-    void integrateInto(const uint8_t samples[PatternMatcher::numElements]) {
-      for (int i = 0; i < PatternMatcher::numElements; ++i) {
+    void integrateInto(const uint8_t samples[numElements]) {
+      for (int i = 0; i < numElements; ++i) {
         pattern[i] = (pattern[i] * count + samples[i]) / (count + 1);
       }
       ++count;
     }
   };
 
-  void reset() {
-    index = 0;  // start over.
+  void startTraining() {
+    sampleIndex = 0;  // start over.
+  }
+
+  bool isTraining() const {
+    return sampleIndex < numSamples;
   }
 
   // Add a pattern if we can.
-  void addPattern(int pattern[PatternMatcher::numElements]) {
-    if (index < numSamples) {
-      copyInto(pattern, samples[index].samples);
-      ++index;
-      sout << F("  KMeans copying ") << index << '/' << numSamples << F(" pattern\n");
-      if (index == numSamples) {
+  void addSample(int pattern[numElements]) {
+    if (sampleIndex < numSamples) {
+      copyInto(pattern, samples[sampleIndex].samples);
+      ++sampleIndex;
+      sout << F("  KMeans copying ") << sampleIndex << '/' << numSamples << F(" pattern\n");
+      if (sampleIndex == numSamples) {
         sout << "COMPUTING!!!\n";
         compute();
       }
 
     } else {
-      sout << F("  KMeans ") << index << F(" ready to write\n");
+      sout << F("  KMeans ") << sampleIndex << F(" ready to write\n");
     }
   }
 
-  void copyInto(int src[PatternMatcher::numElements], uint8_t dst[PatternMatcher::numElements]) {
-    for (int i = 0; i < PatternMatcher::numElements; ++i) {
+  void copyInto(int src[numElements], uint8_t dst[numElements]) {
+    for (int i = 0; i < numElements; ++i) {
       dst[i] = static_cast<uint8_t>(src[i]);
     }
   }
 
   // once we get going..
-  float squaredError(const uint8_t src[PatternMatcher::numElements], const float pattern[PatternMatcher::numElements]) const {
+  float squaredError(const uint8_t src[numElements], const float pattern[numElements]) const {
     float err2 = 0;
-    for (int i = 0; i < PatternMatcher::numElements; ++i) {
+    for (int i = 0; i < numElements; ++i) {
       float err = float(src[i]) - pattern[i];
       err2 += err * err;
     }
-    err2 /= PatternMatcher::numElements;
+    err2 /= numElements;
 
     return err2;
   }
@@ -354,7 +326,7 @@ struct KMeans {
     writeNextCol();
 
     // Normal samples.
-    for (int i = 0; i < index; ++i) {
+    for (int i = 0; i < sampleIndex; ++i) {
       Keyboard.print(F("env"));
       Keyboard.print(i);
       writeNextCol();
@@ -371,10 +343,10 @@ struct KMeans {
     writeNextRow();
 
     // All the other rows.  Final two are fake row, shows which pattern.
-    for (int element = 0; element <= PatternMatcher::numElements + 1; ++element) {
+    for (int element = 0; element <= numElements + 1; ++element) {
 
-      bool patternRow = (element == PatternMatcher::numElements);
-      bool errRow = (element == PatternMatcher::numElements + 1);
+      bool patternRow = (element == numElements);
+      bool errRow = (element == numElements + 1);
 
       if (errRow) {
         // skip a row, data, not part of graph.
@@ -428,11 +400,12 @@ struct KMeans {
     delay(10);
   }
 
-
   static const uint8_t numSamples = 8;  // for kmeans. (32 not enough)
   static const uint8_t K = 2;           // should be four, but 2 for now.
-  uint8_t index = 0;                    // for counting.
+  uint8_t sampleIndex = 0;              // for counting.
+  uint8_t elementIndex = 0;             // while accumulating.
 
+  // maybe this should be split off, since it's really temporary and all we really need in the end is the pattern.
   Sample samples[numSamples];
 
   // and K patterns since it's k means and all.   Maybe we could/should keep these separate
@@ -442,14 +415,7 @@ struct KMeans {
 
 KMeans kmeans;
 
-
-PatternMatcher pattern;
-
-// these should go into the class.
-float successErr = 0;  // filtered.
-float failureErr = 0;  // filtered.
-
-// so should this.
+// When evaluating, what we get.
 long successes = 0;
 long failures = 0;
 long falsePositives = 0;
@@ -487,24 +453,12 @@ void loop() {
     paused = false;
   }
 
-  // see if training, still works if paused.
-  if (digitalRead(trainingPin) != pattern.training) {
-    pattern.training = !pattern.training;
-    if (pattern.training) {
-      sout << SW::CLS << F("START TRAINING\n");
-      pattern.clear();
-      initialThreshold = 50;
-      successErr = 0;
-      failureErr = 0;
-      kmeans.reset();
-    } else {
-      // todo determine, maybe by keeping some filtered versions.
-      pattern.threshold = (successErr + failureErr) / 2.0f;
-      sout << F("END TRAINING, thresh: ") << pattern.threshold << '\n';
-      successes = 0;
-      failures = 0;
-      falsePositives = 0;
-    }
+  // Reset training.
+  if (digitalRead(trainingPin)) {
+    kmeans.startTraining();
+    sout << SW::CLS << F("START TRAINING\n");
+    initialThreshold = 50;
+    delay(1000);  // debounce.
   }
 
   // only process if not paused.
@@ -552,24 +506,30 @@ void loop() {
               //    Serial.print(F("now"));
               //Serial.println(val);
               state = State::TRACKING;
-              pattern.startSampling();
+              accBuffer.startAccumulating();
             }
             break;
           }
         case State::TRACKING:
           {
             // returns true when finished.
-            if (pattern.addSample(envelope)) {
-              if (pattern.success) {
-                ++successes;
+            if (accBuffer.addSubElement(envelope)) {
+              if (kmeans.isTraining()) {
                 state = State::PRE_LOOK;
                 sampleTimeout = 1;  // wait a quarter second before reeling in.
+                sout << F("  ") << accBuffer.buffer << '\n';
               } else {
-                ++failures;
-                state = State::LISTENING;
-                sampleTimeout = 4000;  // wait a second.
-              }
-              if (!pattern.training) {
+                // TODO Score it, etc.
+                bool success = false;
+                if (success) {
+                  ++successes;
+                  state = State::PRE_LOOK;
+                  sampleTimeout = 1;  // wait a quarter second before reeling in.
+                } else {
+                  ++failures;
+                  state = State::LISTENING;
+                  sampleTimeout = 4000;  // wait a second.
+                }
                 printStats();
               }
             }
@@ -596,60 +556,37 @@ void loop() {
 
             const bool present = (postLookVal > preLookVal * 1.3f && postLookVal > 20);
 
-            if (!pattern.training && !present) {
+            if (!kmeans.isTraining() && !present) {
               ++falsePositives;
             }
 
             if (present) {
-              sout << SW::GREEN << F(" Present! ");
+              sout << SW::DARK_GREEN << F(" Present! ");
             } else {
               sout << SW::RED << F(" Not Present! ");
             }
 
             sout << F("Pre: ") << preLookVal << F(", Post: ") << postLookVal << SW::DEF << '\n';
 
-            // if 50% higher.8k9.  I know, it's rash but it gets bright.
-            if (present) {
-              state = State::DROP;
-              if (pattern.training) {
-                sout << SW::GREEN << F("  Integrating") << SW::DEF;
-                pattern.integratePattern();
-                sout << F("  lastErr: ") << pattern.lastErr << F(", old successErr: ") << successErr << '\n';
-                // need at least one already.
-                if (pattern.numPatterns > 1) {
-                  successErr = (successErr == 0) ? pattern.lastErr : (successErr * .9f + pattern.lastErr * .1f);
-                  printSuccessFailureErrs();
-                }
+            state = State::DROP;
+            if (kmeans.isTraining()) {
+              if (present) {
+                // reset the false positive stream.
                 falsePositiveStreak = 0;
-
-                if (pattern.training) {
-                  // copy to tthe debug patterns
-                  kmeans.addPattern(pattern.currentPattern);
-                }
-              }
-            } else {
-              state = State::DROP;
-              if (pattern.training) {
+                // add a new sample for kmeans.
+                kmeans.addSample(accBuffer.buffer);
+                // not present.
+              } else {
                 sout << SW::RED << F("  Discarding pattern\n") << SW::DEF;
-                sout << F("  lastErr: ") << pattern.lastErr << F(", old failureErr: ") << failureErr << F(", FP Streak: ") << falsePositiveStreak << '\n';
+                sout << F("  False positive streak: ") << falsePositiveStreak << '\n';
 
-                if (pattern.numPatterns > 0) {
-                  failureErr = (failureErr == 0) ? pattern.lastErr : (failureErr * .9f + pattern.lastErr * .1f);
-                  printSuccessFailureErrs();
-
-                  if (++falsePositiveStreak >= 5) {
-                    falsePositiveStreak = 0;
-                    initialThreshold *= 1.1f;
-                    sout << F(" Init threshold now ") << initialThreshold << '\n';
-                  }
-                }
-
-                if (pattern.numPatterns == 0) {
+                // if no valid samples yet.
+                if (kmeans.sampleIndex == 0 || ++falsePositiveStreak >= 5) {
+                  falsePositiveStreak = 0;
                   initialThreshold *= 1.1f;
-                  sout << F(" Init threshold now ") << initialThreshold << '\n';
+                  sout << F("  Init threshold now ") << initialThreshold << '\n';
                 }
               }
-              // TODO note that it was a failure, and we don't have to discard anything.
             }
             break;
           }
@@ -678,8 +615,7 @@ void loop() {
     }
   }
 
-
-  if (pattern.training && digitalRead(outputPin)) {
+  if (digitalRead(outputPin)) {
     kmeans.write();
     delay(4000);
   }
@@ -713,10 +649,6 @@ void loop() {
 // TODO add false positives, a match but no fish.
 void printStats() {
   sout << F(" Matches: ") << successes << F(", Failures: ") << failures << F(", False Positives: ") << falsePositives << '\n';
-}
-
-void printSuccessFailureErrs() {
-  sout << F("  new SuccessErr: ") << successErr << F(", new FailureErr: ") << failureErr << '\n';
 }
 
 #ifdef DEBUG
