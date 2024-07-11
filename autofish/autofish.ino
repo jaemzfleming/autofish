@@ -244,7 +244,7 @@ struct Patterns {
         bestPattern = i;
       }
     }
-    bool match = minStdDevs <= -2;
+    bool match = minStdDevs <= 2;
 
     if (match) {
       sout << " " << SW::DARK_GREEN << F("Match!");
