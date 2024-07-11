@@ -76,14 +76,9 @@ const char* SW::CLS = "\033[2J\033[H";
 
 class SerialWrapper {
 public:
-  template<typename T>
-  SerialWrapper& operator<<(const T& data) {
-    Serial.print(data);
-    return *this;
-  }
 
   template<size_t N>
-  SerialWrapper& operator<<(const int (&array)[N]) {
+  SerialWrapper& operator<<(const uint8_t (&array)[N]) {
     *this << "(";
     for (size_t i = 0; i < N; i++) {
       *this << array[i];
@@ -105,6 +100,12 @@ public:
       }
     }
     *this << ")";
+    return *this;
+  }
+
+  template<typename T>
+  SerialWrapper& operator<<(const T& data) {
+    Serial.print(data);
     return *this;
   }
 };
@@ -138,25 +139,32 @@ struct AccumulatingBuffer {
   void startAccumulating() {
     currentElement = 0;
     currentSample = 0;
+    internalData[currentElement] = 0;
   }
   // Adds a sample, returns true when finished.
   bool addSubElement(int value) {
-    data[currentElement] += abs(value);
+    internalData[currentElement] += abs(value);
     ++currentSample;
     if (currentSample == samplesPerElement) {
       currentSample = 0;
       ++currentElement;
       if (currentElement == numElements) {
         for (int i = 0; i < numElements; ++i) {
-          data[i] /= samplesPerElement;
+          data[i] = static_cast<uint8_t>(internalData[i] / samplesPerElement);
         }
         return true;
+      } else {
+        internalData[currentElement] = 0;
+        return false;
       }
     }
     return false;
   }
 
-  int data[numElements];
+  uint8_t data[numElements];
+
+protected:
+  int internalData[numElements];
   int currentElement = 0;
   int currentSample = 0;
 };
@@ -174,9 +182,9 @@ struct Patterns {
   static const uint8_t K = 2;  // should be four, but 2 for now.
 
   struct Pattern {
-    int count = 0;          // how many were averaged into the data.
-    float averageErr = 0;   // non squared, the average err from this pattern once matched.
-    float errVariance = 0;  // what the variance was.
+    int count = 0;         // how many were averaged into the data.
+    float averageErr = 0;  // non squared, the average err from this pattern once matched.
+    float errStdDev = 0;   // what the variance was.
     float data[numElements];
 
     // Average us into this.
@@ -220,7 +228,34 @@ struct Patterns {
     return { bestIndex, minErr };
   }
 
+  // Does this count as a match (currently 2 stdevs since it shouldn't be gaussian, should be better, maybe 1 would be best?)
+  bool isMatch(const uint8_t src[numElements]) {
+    float minStdDevs = 10e3;
+    float bestErr = 10e3;
+    int bestPattern = 0;
 
+    for (int i = 0; i < K; ++i) {
+      auto& p = patterns[i];
+      float err = sqrtf(p.squaredError(src));
+      float stddevs = (err - p.averageErr) / p.errStdDev;
+      if (stddevs < minStdDevs) {
+        minStdDevs = stddevs;
+        bestErr = err;
+        bestPattern = i;
+      }
+    }
+    bool match = minStdDevs <= -2;
+
+    if (match) {
+      sout << " " << SW::DARK_GREEN << F("Match!");
+    } else {
+      sout << " " << SW::RED << F("Not Match!");
+    }
+
+    sout << SW::DEF << " " << F(" stddevs: ") << minStdDevs << F(", pattern: ") << bestPattern << F(", err: ") << bestErr << '\n';
+
+    return match;
+  }
 
   // and K patterns since it's k means and all.   Maybe we could/should keep these separate
   // from the samples.
@@ -231,6 +266,8 @@ Patterns patterns;
 
 // Start doing kmeans.
 struct KMeans {
+
+  static const uint8_t numSamples = 16;  // for kmeans. (32 not enough)
 
   struct Sample {
     uint8_t samples[numElements];
@@ -247,9 +284,12 @@ struct KMeans {
   }
 
   // Add a pattern if we can.
-  void addSample(int pattern[numElements]) {
+  void addSample(const uint8_t sample[numElements]) {
     if (sampleIndex < numSamples) {
-      copyInto(pattern, samples[sampleIndex].samples);
+      auto& s = samples[sampleIndex];
+      for (size_t i = 0; i < numElements; ++i) {
+        s.samples[i] = sample[i];
+      }
       ++sampleIndex;
       sout << F("  ") << sampleIndex << '/' << numSamples << F(" samples acquired\n");
       if (sampleIndex == numSamples) {
@@ -259,12 +299,6 @@ struct KMeans {
 
     } else {
       sout << F("  KMeans ") << sampleIndex << F(" ready to write\n");
-    }
-  }
-
-  void copyInto(int src[numElements], uint8_t dst[numElements]) {
-    for (int i = 0; i < numElements; ++i) {
-      dst[i] = static_cast<uint8_t>(src[i]);
     }
   }
 
@@ -349,6 +383,27 @@ struct KMeans {
       }
 
     } while (changed && ++steps < 16);
+
+    // Per pattern, compute the average err (not squared) and the variance so that we can use that as criteria.
+    for (int i = 0; i < Patterns::K; ++i) {
+      auto& p = patterns.patterns[i];
+      float err = 0;
+      for (auto& s : samples) {
+        if (s.patternIndex == i) {
+          err += sqrtf(s.minSquaredError);
+        }
+      }
+      p.averageErr = err / p.count;
+      float variance = 0;
+      // variance.
+      for (auto& s : samples) {
+        if (s.patternIndex == i) {
+          float delta = sqrtf(s.minSquaredError) - p.averageErr;
+          variance += delta * delta;
+        }
+      }
+      p.errStdDev = sqrtf(variance / (p.count - 1));
+    }
   }
 
   void write() const {
@@ -374,11 +429,21 @@ struct KMeans {
     }
     writeNextRow();
 
+    enum class RowType {
+      NORMAL = 0,
+      PATTERN,
+      ERR,
+      STDDEV
+    };
+
     // All the other rows.  Final two are fake row, shows which pattern.
-    for (int element = 0; element <= numElements + 1; ++element) {
+    for (int element = 0; element <= numElements + 2; ++element) {
+
+      RowType rowType = (element < numElements) ? RowType::NORMAL : RowType(1 + element - numElements);
 
       bool patternRow = (element == numElements);
       bool errRow = (element == numElements + 1);
+      bool varianceRow = (element == numElements + 2);
 
       if (errRow) {
         // skip a row, data, not part of graph.
@@ -389,13 +454,17 @@ struct KMeans {
       writeNextCol();
 
       for (auto& s : samples) {
-        if (errRow) {
-          writeFloat(s.minSquaredError);
-        } else if (patternRow) {
-          writeInt(s.patternIndex * 25);
-        } else {
-          writeInt(s.samples[element]);
-        }
+        switch (rowType) {
+          case RowType::NORMAL:
+            writeInt(s.samples[element]);
+            break;
+          case RowType::PATTERN:
+            writeInt(s.patternIndex * 25);
+            break;
+          case RowType::ERR:
+            writeFloat(sqrtf(s.minSquaredError));
+            break;
+        };
         writeNextCol();
       }
 
@@ -403,13 +472,21 @@ struct KMeans {
       for (int i = 0; i < Patterns::K; ++i) {
         const auto& p = patterns.patterns[i];
         if (p.count > 0) {
-          if (errRow) {
-            writeFloat(0);  // no errror.
-          } else if (patternRow) {
-            writeInt(i * 25);
-          } else {
-            writeFloat(p.data[element]);
-          }
+
+          switch (rowType) {
+            case RowType::NORMAL:
+              writeFloat(p.data[element]);
+              break;
+            case RowType::PATTERN:
+              writeInt(i * 25);
+              break;
+            case RowType::ERR:
+              writeFloat(p.averageErr);  // show the error.
+              break;
+            case RowType::STDDEV:
+              writeFloat(p.errStdDev);
+              break;
+          };
           writeNextCol();
         }
       }
@@ -432,8 +509,7 @@ struct KMeans {
     delay(10);
   }
 
-  static const uint8_t numSamples = 8;  // for kmeans. (32 not enough)
-  uint8_t sampleIndex = 0;              // for counting.
+  uint8_t sampleIndex = 0;  // for counting.
 
   // maybe this should be split off, since it's really temporary and all we really need in the end is the pattern.
   Sample samples[numSamples];
@@ -526,15 +602,16 @@ void loop() {
               sout << F(" LastCast Timeout exceeding, reeling in\n");
               state = State::REELING_IN;
               sampleTimeout = 1;
+              break;
             }
 
             if (abs(val) > initialThreshold) {
-              //    Serial.print(F("now"));
-              //Serial.println(val);
               state = State::TRACKING;
               accBuffer.startAccumulating();
+              // explicitly fall through so we get that first one.
+            } else {
+              break;
             }
-            break;
           }
         case State::TRACKING:
           {
@@ -542,11 +619,11 @@ void loop() {
             if (accBuffer.addSubElement(envelope)) {
               if (kmeans.isTraining()) {
                 state = State::PRE_LOOK;
-                sampleTimeout = 1;  // wait a quarter second before reeling in.
+                sampleTimeout = 1;
                 sout << F("  ") << accBuffer.data << '\n';
               } else {
-                // TODO Score it, etc.
-                bool success = false;
+                //are we a match?
+                bool success = patterns.isMatch(accBuffer.data);
                 if (success) {
                   ++successes;
                   state = State::PRE_LOOK;
