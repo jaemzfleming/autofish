@@ -199,7 +199,7 @@ struct KMeans {
     if (sampleIndex < numSamples) {
       copyInto(pattern, samples[sampleIndex].samples);
       ++sampleIndex;
-      sout << F("  KMeans copying ") << sampleIndex << '/' << numSamples << F(" pattern\n");
+      sout << F("  ") << sampleIndex << '/' << numSamples << F(" samples acquired\n");
       if (sampleIndex == numSamples) {
         sout << "COMPUTING!!!\n";
         compute();
