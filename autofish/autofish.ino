@@ -533,8 +533,8 @@ struct Stats {
   }
 
   void print() {
-    sout << F(" True Positives: ") << truePositives << F(", True Negatives: ") << trueNegatives << F(", False Positives: ") << falsePositives << F(", False Negatives: ") << falsePositives << '\n';
-    sout << F(" FPR: ") << 100.0f * falsePositives / (trueNegatives + falsePositives) << " FNR: " << 100.0f * falsePositives / (trueNegatives + falsePositives) << '\n';
+    sout << F(" True Positives: ") << truePositives << F(", True Negatives: ") << trueNegatives << F(", False Positives: ") << falsePositives << F(", False Negatives: ") << falseNegatives << '\n';
+    sout << F(" FPR: ") << 100.0f * falsePositives / (trueNegatives + falsePositives) << " FNR: " << 100.0f * falseNegatives / (truePositives + falseNegatives) << '\n';
   }
 };
 
