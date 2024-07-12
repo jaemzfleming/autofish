@@ -183,9 +183,9 @@ struct Patterns {
   static const uint8_t K = 2;  // should be four, but 2 for now.
 
   struct Pattern {
-    int count = 0;         // how many were averaged into the data.
-    float averageErr = 0;  // non squared, the average err from this pattern once matched.
-    float errStdDev = 0;   // what the variance was.
+    int count = 0;        // how many were averaged into the data.  Don't use if zero.
+    float meanErr = 0;    // non squared, the average err from this pattern once matched.
+    float stdDevErr = 0;  // stddev of that same err.
     float data[numElements];
 
     // Average us into this.
@@ -237,12 +237,14 @@ struct Patterns {
 
     for (int i = 0; i < K; ++i) {
       auto& p = patterns[i];
-      float err = sqrtf(p.squaredError(src));
-      float stddevs = (err - p.averageErr) / p.errStdDev;
-      if (stddevs < minStdDevs) {
-        minStdDevs = stddevs;
-        bestErr = err;
-        bestPattern = i;
+      if (p.count > 0) {
+        float err = sqrtf(p.squaredError(src));
+        float stddevs = (err - p.meanErr) / p.stdDevErr;
+        if (stddevs < minStdDevs) {
+          minStdDevs = stddevs;
+          bestErr = err;
+          bestPattern = i;
+        }
       }
     }
     bool match = minStdDevs <= 2;
@@ -325,6 +327,7 @@ struct KMeans {
       s.minSquaredError = -2.0f;
     }
 
+    // Find initial seeds for each pattern.
     for (int destPattern = 0; destPattern < Patterns::K; ++destPattern) {
       sout << "dest pattern =" << destPattern << '\n';
       float maxErr = -1;
@@ -373,7 +376,6 @@ struct KMeans {
       }
 
       patterns.resetCounts();
-
       // Average the samples into the patterns
       for (auto& s : samples) {
         patterns.patterns[s.patternIndex].integrateInto(s.samples);
@@ -383,23 +385,33 @@ struct KMeans {
 
     // Per pattern, compute the average err (not squared) and the variance so that we can use that as criteria.
     for (int i = 0; i < Patterns::K; ++i) {
+
       auto& p = patterns.patterns[i];
-      float err = 0;
-      for (auto& s : samples) {
-        if (s.patternIndex == i) {
-          err += sqrtf(s.minSquaredError);
+
+      if (p.count == 0) {
+        // no data.
+        p.meanErr = p.stdDevErr = 0;
+      } else {
+        float err = 0;
+        for (auto& s : samples) {
+          if (s.patternIndex == i) {
+            err += sqrtf(s.minSquaredError);
+          }
         }
-      }
-      p.averageErr = err / p.count;
-      float variance = 0;
-      // variance.
-      for (auto& s : samples) {
-        if (s.patternIndex == i) {
-          float delta = sqrtf(s.minSquaredError) - p.averageErr;
-          variance += delta * delta;
+        p.meanErr = err / p.count;
+        float variance = 0;
+        // variance.
+        for (auto& s : samples) {
+          if (s.patternIndex == i) {
+            float delta = sqrtf(s.minSquaredError) - p.meanErr;
+            variance += delta * delta;
+          }
         }
+        p.stdDevErr = sqrtf(variance / (p.count - 1));
       }
-      p.errStdDev = sqrtf(variance / (p.count - 1));
+
+      sout << SW::MAGENTA << F("Pattern ") << i << F(", mean: ") << p.meanErr << F(", stddev: ") << p.stdDevErr << '\n'
+           << SW::DEF;
     }
   }
 
@@ -430,24 +442,37 @@ struct KMeans {
       NORMAL = 0,
       PATTERN,
       ERR,
-      STDDEV
+      STDDEV,
+      COUNT,
+      LAST,
     };
 
     // All the other rows.  Final two are fake row, shows which pattern.
-    for (int element = 0; element <= numElements + 2; ++element) {
+    for (int element = 0; element < static_cast<int>(RowType::LAST); ++element) {
 
       RowType rowType = (element < numElements) ? RowType::NORMAL : RowType(1 + element - numElements);
 
-      bool patternRow = (element == numElements);
-      bool errRow = (element == numElements + 1);
-      bool varianceRow = (element == numElements + 2);
-
-      if (errRow) {
+      if (rowType == RowType::ERR) {
         // skip a row, data, not part of graph.
         writeNextRow();
       }
 
-      Keyboard.print(element);
+      // mostly print the index, except for the err and stdev,
+      switch (rowType) {
+        case RowType::ERR:
+          Keyboard.print(F("mean"));
+          break;
+        case RowType::STDDEV:
+          Keyboard.print(F("stddev"));
+          break;
+        case RowType::COUNT:
+          Keyboard.print(F("count"));
+          break;
+        default:
+          Keyboard.print(element);
+          break;
+      };
+
       writeNextCol();
 
       for (auto& s : samples) {
@@ -461,9 +486,8 @@ struct KMeans {
           case RowType::ERR:
             writeFloat(sqrtf(s.minSquaredError));
             break;
-          case RowType::STDDEV:
+          default:
             Keyboard.print(" ");
-            break;
         };
         writeNextCol();
       }
@@ -472,7 +496,6 @@ struct KMeans {
       for (int i = 0; i < Patterns::K; ++i) {
         const auto& p = patterns.patterns[i];
         if (p.count > 0) {
-
           switch (rowType) {
             case RowType::NORMAL:
               writeFloat(p.data[element]);
@@ -481,10 +504,13 @@ struct KMeans {
               writeInt(i * 25);
               break;
             case RowType::ERR:
-              writeFloat(p.averageErr);  // show the error.
+              writeFloat(p.meanErr);  // show the error.
               break;
             case RowType::STDDEV:
-              writeFloat(p.errStdDev);
+              writeFloat(p.stdDevErr);
+              break;
+            case RowType::COUNT:
+              writeInt(p.count);
               break;
           };
           writeNextCol();
@@ -540,13 +566,37 @@ struct Stats {
 
 Stats stats;
 
-// during training, every 5 bumps up the initial threshold.
-int falsePositiveStreak = 0;
+
+struct Threshold {
+
+  // we'll keep raising this until we get a true value.
+  float value = 50;
+
+  // Start over again.
+  void reset() {
+    value = 50;
+    falsePositiveStreak = 0;
+  }
+
+  // call this to add a false positive.
+  void addFalsePositive() {
+    if (++falsePositiveStreak >= 5) {
+      falsePositiveStreak = 0;
+      value *= 1.1f;
+      sout << F("  threshold increased to: ") << value << '\n';
+    } else {
+      sout << F("  False positive streak: ") << falsePositiveStreak << '\n';
+    }
+  }
+
+  // during training, every 5 bumps up the initial threshold.
+  int falsePositiveStreak = 0;
+};
+Threshold threshold;
+
 
 long sampleTimeout = 10;
 float preLookVal = 0;  // before we fished.
-// we'll keep raising this until we get a true value.
-float initialThreshold = 50;
 
 // when we last cast, used for a timeout during listening
 // The lure can get stuck on something in the water
@@ -577,7 +627,7 @@ void loop() {
   if (digitalRead(trainingPin)) {
     kmeans.startTraining();
     sout << SW::CLS << F("START TRAINING\n");
-    initialThreshold = 50;
+    threshold.reset();
     delay(1000);  // debounce.
   }
 
@@ -591,7 +641,7 @@ void loop() {
         sout << SW::BLUE;
         switch (state) {
           case State::LISTENING:
-            sout << F("LISTENING...\n");
+            sout << F("\nLISTENING...") << SW::DEF << F(" threshold: ") << threshold.value << '\n';
             break;
           case State::PRE_LOOK:
             sout << F("PRE LOOK\n");
@@ -621,12 +671,14 @@ void loop() {
             // timeout, we are stuck on something.
             if (millis() - lastCastMs > 60000) {
               sout << F(" LastCast Timeout exceeding, reeling in\n");
-              state = State::REELING_IN;
-              sampleTimeout = 1;
+              Mouse.click(MOUSE_RIGHT);
+              sampleTimeout = 8000;  // wait a second before dropping.
+              // go straight to drop so we don't count false or true positives.
+              state = State::DROP;
               break;
             }
 
-            if (abs(val) > initialThreshold) {
+            if (abs(val) > threshold.value) {
               state = State::TRACKING;
               accBuffer.startAccumulating();
               // explicitly fall through so we get that first one.
@@ -706,7 +758,7 @@ void loop() {
               } else if (!present) {
                 --stats.truePositives;
                 ++stats.falsePositives;
-                  sout << F("FALSE POSITIVE!!!, it was not present after all\n");
+                sout << F("FALSE POSITIVE!!!, it was not present after all\n");
               }
               sout << F(" Final Stats:\n");
               stats.print();
@@ -714,24 +766,17 @@ void loop() {
             } else {
               if (present) {
                 // reset the false positive stream.
-                falsePositiveStreak = 0;
+                threshold.falsePositiveStreak = 0;
                 // add a new sample for kmeans.
                 kmeans.addSample(accBuffer.data);
-
-                // if done, we reset the stats.
-                if (!kmeans.isTraining()) {
-                  stats.reset();
-                }
                 // not present.
               } else {
                 sout << SW::RED << F("  Discarding pattern\n") << SW::DEF;
-                sout << F("  False positive streak: ") << falsePositiveStreak << '\n';
 
                 // if no valid samples yet.
-                if (!kmeans.hasValidSamples() || ++falsePositiveStreak >= 5) {
-                  falsePositiveStreak = 0;
-                  initialThreshold *= 1.1f;
-                  sout << F("  Init threshold now ") << initialThreshold << '\n';
+                if (!kmeans.hasValidSamples()) {
+                  // bump it up!
+                  threshold.addFalsePositive();
                 }
               }
             }
