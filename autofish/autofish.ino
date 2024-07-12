@@ -15,6 +15,9 @@ int videoDebugPin = 9;  // show the raw video feed.
 int audioPin = A0;
 int opticalPin = A1;
 
+// last check result, for false negative testing.
+bool wasMatch = false;
+
 void writeInt(int val, int decimal = 0);
 void writeFloat(float f);
 
@@ -24,7 +27,6 @@ enum class State {
   PRE_LOOK,
   REELING_IN,
   POST_LOOK,
-  CHECK_FALSE_NEGATIVE,
   DROP,
   CASTING,
 };
@@ -305,7 +307,7 @@ struct KMeans {
         s.samples[i] = sample[i];
       }
       ++sampleIndex;
-      sout << F("  ") << sampleIndex << '/' << numSamples << F(" samples acquired\n");
+      sout << SW::DARK_GREEN << F("  ") << sampleIndex << '/' << numSamples << F(" samples acquired\n") << SW::DEF;
       if (sampleIndex == numSamples) {
         sout << "COMPUTING!!!\n";
         compute();
@@ -672,13 +674,13 @@ void loop() {
             sout << F("\nLISTENING...") << SW::DEF << F(" threshold: ") << threshold.value << '\n';
             break;
           case State::PRE_LOOK:
-            sout << F("PRE LOOK\n");
+            sout << F("PRE LOOK");
             break;
           case State::REELING_IN:
             sout << F("REELING IN\n");
             break;
           case State::POST_LOOK:
-            sout << F("POST LOOK\n");
+            sout << F("POST LOOK");
             break;
           case State::CHECK_FALSE_NEGATIVE:
             sout << F("CHECK FALSE NEGATIVE\n");
@@ -725,6 +727,7 @@ void loop() {
               } else {
                 //are we a match?
                 bool success = patterns.isMatch(accBuffer.data);
+                wasMatch = success;
                 if (success) {
                   ++stats.truePositives;  // assume true until shown otherwise.
                   state = State::PRE_LOOK;
@@ -734,7 +737,8 @@ void loop() {
                   // check for false negitaves (todo make a switch.)
                   bool checkForFalseNegative = true;
                   if (checkForFalseNegative) {
-                    state = State::CHECK_FALSE_NEGATIVE;
+                    // need to pre-look and reel in to test properly.
+                    state = State::PRE_LOOK;
                     sampleTimeout = 1;
                   } else {
                     state = State::LISTENING;
@@ -748,6 +752,7 @@ void loop() {
         case State::PRE_LOOK:
           {
             preLookVal = analogRead(opticalPin);
+            sout << F("   ") << preLookVal << '\n';
             sampleTimeout = 500;
             state = State::REELING_IN;
             break;
@@ -759,23 +764,17 @@ void loop() {
             state = State::POST_LOOK;
             break;
           }
-        case State::CHECK_FALSE_NEGATIVE:
         case State::POST_LOOK:
           {
             float postLookVal = analogRead(opticalPin);
 
             const bool present = (postLookVal > preLookVal * 1.3f && postLookVal > 20);
 
-            if (present) {
-              sout << SW::DARK_GREEN << F(" Present! ");
-            } else {
-              sout << SW::RED << F(" Not Present! ");
-            }
-            sout << F("Pre: ") << preLookVal << F(", Post: ") << postLookVal << SW::DEF << '\n';
+            sout << F("  ") << (present ? SW::DARK_GREEN : SW::RED) << postLookVal << (present ? F(", Present!\n") : F(", Not Present!\n")) << SW::DEF;
 
             if (!kmeans.isTraining()) {
-              // this was false, not true.
-              if (state == State::CHECK_FALSE_NEGATIVE) {
+              // if not a match, we must be checking for false negatives.
+              if (!wasMatch) {
                 if (present) {
                   --stats.trueNegatives;
                   ++stats.falseNegatives;
@@ -786,7 +785,6 @@ void loop() {
                 ++stats.falsePositives;
                 sout << F("FALSE POSITIVE!!!, it was not present after all\n");
               }
-              sout << F(" Final Stats:\n");
               stats.print();
 
             } else {
