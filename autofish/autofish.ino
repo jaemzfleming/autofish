@@ -4,13 +4,13 @@
 //#define DEBUG
 #define DEBUG2  // dumps up to 10 valid envelopes.
 
-int pausePin = 9;     // set high to pause
-int trainingPin = 8;  // set high to train
+int pausePin = 4;     // set high to pause
+int trainingPin = 5;  // set high to train
 // These things are Only while paused
-int outputPin = 7;      // dump training data to spreadsheet
-int resetStatsPin = 6;  // reset the statistics
-int audioDebugPin = 5;  // show the raw audio feed (minus bias)
-int videoDebugPin = 4;  // show the raw optical feed
+int outputPin = 6;      // dump training data to spreadsheet
+int resetStatsPin = 7;  // reset the statistics
+int audioDebugPin = 8;  // show the raw audio feed (minus bias)
+int videoDebugPin = 9;  // show the raw video feed.
 
 int audioPin = A0;
 int opticalPin = A1;
