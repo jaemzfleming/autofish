@@ -189,7 +189,7 @@ struct Patterns {
     float errorSquared;
   };
 
-  static const uint8_t K = 2;  // should be four, but 2 for now.
+  static const uint8_t K = 4;  // should be four, but 2 for now.
 
   struct Pattern {
     int count = 0;        // how many were averaged into the data.  Don't use if zero.
@@ -279,7 +279,7 @@ Patterns patterns;
 // Start doing kmeans.
 struct KMeans {
   // usually 64 to get a decent smattering.
-  static const uint8_t numSamples = 16;  // for kmeans. (32 not enough)
+  static const uint8_t numSamples = 64;  // for kmeans. (32 not enough)
 
   struct Sample {
     uint8_t samples[numElements];
