@@ -6,7 +6,11 @@
 
 int pausePin = 9;     // set high to pause
 int trainingPin = 8;  // set high to train
-int outputPin = 7;    // set high to dump envelopes to spreadsheet
+// These things are Only while paused
+int outputPin = 7;      // dump training data to spreadsheet
+int resetStatsPin = 6;  // reset the statistics
+int audioDebugPin = 5;  // show the raw audio feed (minus bias)
+int videoDebugPin = 4;  // show the raw optical feed
 
 int audioPin = A0;
 int opticalPin = A1;
@@ -114,9 +118,12 @@ public:
 SerialWrapper sout;
 
 void setup() {
-  pinMode(pausePin, INPUT);     // Set the button as an input
-  pinMode(trainingPin, INPUT);  // Set the button as an input
-  pinMode(outputPin, INPUT);    // Set the button as an input
+  pinMode(pausePin, INPUT);       // Set the button as an input
+  pinMode(trainingPin, INPUT);    // Set the button as an input
+  pinMode(outputPin, INPUT);      // Set the button as an input
+  pinMode(resetStatsPin, INPUT);  // Set the button as an input
+  pinMode(audioDebugPin, INPUT);  // Set the button as an input
+  pinMode(videoDebugPin, INPUT);  // Set the button as an input
 }
 
 
@@ -448,7 +455,7 @@ struct KMeans {
     };
 
     // All the other rows.  Final two are fake row, shows which pattern.
-    for (int element = 0; element < (numElements + static_cast<int>(RowType::LAST - 1)); ++element) {
+    for (int element = 0; element < (numElements + static_cast<int>(RowType::LAST) - 1); ++element) {
 
       RowType rowType = (element < numElements) ? RowType::NORMAL : RowType(1 + element - numElements);
 
@@ -617,7 +624,25 @@ void loop() {
       sout << F("PAUSED\n");
       paused = true;
     }
+
+    if (digitalRead(outputPin)) {
+      kmeans.write();
+      delay(4000);
+    } else if (digitalRead(resetStatsPin)) {
+      sout << SW::RED << "RESETTING STATS\n";
+      state = State::DROP;
+      sampleTimeout = 3000;
+      stats.reset();
+      delay(4000);
+    } else if (digitalRead(audioDebugPin)) {
+      // print debugging.
+      sout << F("Audio: ") << val << '\n';
+    } else if (digitalRead(videoDebugPin)) {
+      // print debugging.
+      sout << F("Optical: ") << analogRead(opticalPin) << '\n';
+    }
     delay(100);
+
   } else if (paused) {
     sout << F("UNPAUSED\n");
     paused = false;
@@ -814,11 +839,6 @@ void loop() {
           }
       };
     }
-  }
-
-  if (digitalRead(outputPin)) {
-    kmeans.write();
-    delay(4000);
   }
 
 #ifdef DEBUG
