@@ -448,7 +448,7 @@ struct KMeans {
     };
 
     // All the other rows.  Final two are fake row, shows which pattern.
-    for (int element = 0; element < (numElements + static_cast<int>(RowType::LAST)); ++element) {
+    for (int element = 0; element < (numElements + static_cast<int>(RowType::LAST - 1)); ++element) {
 
       RowType rowType = (element < numElements) ? RowType::NORMAL : RowType(1 + element - numElements);
 
