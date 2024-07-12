@@ -682,9 +682,6 @@ void loop() {
           case State::POST_LOOK:
             sout << F("POST LOOK");
             break;
-          case State::CHECK_FALSE_NEGATIVE:
-            sout << F("CHECK FALSE NEGATIVE\n");
-            break;
           case State::DROP:
             sout << F("DROP\n");
             break;
