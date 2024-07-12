@@ -180,7 +180,7 @@ struct Patterns {
     float errorSquared;
   };
 
-  static const uint8_t K = 4;  // should be four, but 2 for now.
+  static const uint8_t K = 2;  // should be four, but 2 for now.
 
   struct Pattern {
     int count = 0;         // how many were averaged into the data.
@@ -267,8 +267,8 @@ Patterns patterns;
 
 // Start doing kmeans.
 struct KMeans {
-
-  static const uint8_t numSamples = 64;  // for kmeans. (32 not enough)
+  // usually 64 to get a decent smattering.
+  static const uint8_t numSamples = 16;  // for kmeans. (32 not enough)
 
   struct Sample {
     uint8_t samples[numElements];
@@ -661,6 +661,8 @@ void loop() {
                     sampleTimeout = 4000;  // wait a second.
                   }
                 }
+                sout << F(" Preliminary Stats:\n");
+                stats.print();
               }
             }
             break;
@@ -695,13 +697,18 @@ void loop() {
 
             if (!kmeans.isTraining()) {
               // this was false, not true.
-              if (!present) {
+              if (state == State::CHECK_FALSE_NEGATIVE) {
+                if (present) {
+                  --stats.trueNegatives;
+                  ++stats.falseNegatives;
+                  sout << F("FALSE NEGATIVE!!!, it was present after all\n");
+                }
+              } else if (!present) {
                 --stats.truePositives;
                 ++stats.falsePositives;
-              } else if (state == State::CHECK_FALSE_NEGATIVE) {
-                --stats.trueNegatives;
-                ++stats.falseNegatives;
+                  sout << F("FALSE POSITIVE!!!, it was not present after all\n");
               }
+              sout << F(" Final Stats:\n");
               stats.print();
 
             } else {
@@ -736,10 +743,14 @@ void loop() {
           }
         case State::DROP:
           {
-            // We'll roll discard in for now.
+            // Drop everything in slot 8 with left ctrl
             Keyboard.write('8');
             delay(200);
+            Keyboard.press(KEY_LEFT_CTRL);
+            delay(100);
             Keyboard.write('k');
+            delay(100);
+            Keyboard.release(KEY_LEFT_CTRL);
             delay(200);
             Keyboard.write('9');
             delay(200);
