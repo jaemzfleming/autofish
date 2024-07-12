@@ -448,7 +448,7 @@ struct KMeans {
     };
 
     // All the other rows.  Final two are fake row, shows which pattern.
-    for (int element = 0; element < static_cast<int>(RowType::LAST); ++element) {
+    for (int element = 0; element < (numElements + static_cast<int>(RowType::LAST)); ++element) {
 
       RowType rowType = (element < numElements) ? RowType::NORMAL : RowType(1 + element - numElements);
 
@@ -629,6 +629,9 @@ void loop() {
     sout << SW::CLS << F("START TRAINING\n");
     threshold.reset();
     delay(1000);  // debounce.
+    sampleTimeout = 1;
+    state = State::LISTENING;
+    lastCastMs = millis();
   }
 
   // only process if not paused.
@@ -713,8 +716,6 @@ void loop() {
                     sampleTimeout = 4000;  // wait a second.
                   }
                 }
-                sout << F(" Preliminary Stats:\n");
-                stats.print();
               }
             }
             break;
