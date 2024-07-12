@@ -256,7 +256,7 @@ struct Patterns {
         }
       }
     }
-    bool match = minStdDevs <= 2;
+    bool match = minStdDevs <= 3;
 
     if (match) {
       sout << " " << SW::DARK_GREEN << F("Match!");
