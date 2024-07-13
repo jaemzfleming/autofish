@@ -15,6 +15,8 @@ int videoDebugPin = 9;  // show the raw video feed.
 int audioPin = A0;
 int opticalPin = A1;
 
+int audioBias = 511;
+
 // last check result, for false negative testing.
 bool wasMatch = false;
 
@@ -579,11 +581,12 @@ Stats stats;
 struct Threshold {
 
   // we'll keep raising this until we get a true value.
-  float value = 50;
+  static const float startingValue = 3;
+  float value = startingValue;
 
   // Start over again.
   void reset() {
-    value = 50;
+    value = startingValue;
     falsePositiveStreak = 0;
   }
 
@@ -617,7 +620,15 @@ bool paused = false;
 void loop() {
 
   // note we can read more samples now.
-  long val = analogRead(audioPin) - 511;
+  long val = analogRead(audioPin) - audioBias;
+
+  // track a running bias, pretty cheap, i hope.
+  // could make fixed point.
+  static float runningBias = val + audioBias;
+  const float tc = .99f;
+  runningBias = runningBias * tc + (val + audioBias) * (1.0f - tc);
+  //      sout << F("Audio: ") << val << F(", bias: ") << runningBias << '\n';
+  audioBias = static_cast<int>(runningBias + .5f);
 
   //  Serial.println(analogRead(opticalPin));
   if (digitalRead(pausePin)) {
@@ -638,12 +649,18 @@ void loop() {
       delay(4000);
     } else if (digitalRead(audioDebugPin)) {
       // print debugging.
-      sout << F("Audio: ") << val << '\n';
+      /*
+      static float runningBias = val + audioBias;
+      const float tc = .95f;
+      runningBias = runningBias * tc + (val + audioBias) * (1.0f - tc);
+      */
+      sout << F("Audio: ") << val << F(", bias: ") << runningBias << '\n';
+      //audioBias = static_cast<int>(runningBias + .5f);
     } else if (digitalRead(videoDebugPin)) {
       // print debugging.
       sout << F("Optical: ") << analogRead(opticalPin) << '\n';
     }
-    delay(100);
+    delay(50);
 
   } else if (paused) {
     sout << F("UNPAUSED\n");
@@ -981,7 +998,13 @@ void writeInt(int val, int decimal) {
     buffer[index++] = '0' + (val % 10);
     val /= 10;
   } while (val > 0);
-  // and write it out backwards.
+  if (decimal >= index) {
+    Keyboard.write('.');
+    for (int zeros = index; zeros < decimal; ++zeros) {
+      Keyboard.write('0');
+    }
+  }
+
   while (--index >= 0) {
     Keyboard.write(buffer[index]);
     if (index == decimal) {
