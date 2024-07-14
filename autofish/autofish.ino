@@ -581,7 +581,7 @@ Stats stats;
 struct Threshold {
 
   // we'll keep raising this until we get a true value.
-  static const float startingValue = 3;
+  static const float startingValue = 50;
   float value = startingValue;
 
   // Start over again.
@@ -660,7 +660,7 @@ void loop() {
       // print debugging.
       sout << F("Optical: ") << analogRead(opticalPin) << '\n';
     }
-    delay(50);
+    delay(100);
 
   } else if (paused) {
     sout << F("UNPAUSED\n");
@@ -688,7 +688,7 @@ void loop() {
         sout << SW::BLUE;
         switch (state) {
           case State::LISTENING:
-            sout << F("\nLISTENING...") << SW::DEF << F(" threshold: ") << threshold.value << '\n';
+            sout << F("\nLISTENING...") << SW::DEF << F(" threshold: ") << threshold.value << F(", bias: ") << audioBias << '\n';
             break;
           case State::PRE_LOOK:
             sout << F("PRE LOOK");
