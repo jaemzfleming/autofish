@@ -20,7 +20,8 @@ int audioBias = 511;
 // last check result, for false negative testing.
 bool wasMatch = false;
 
-void writeInt(int val, int decimal = 0);
+char* writeIntToBuffer(char buffer[], int bufferSize, int val, int decimal = 0, int minWidth = 0);
+void writeInt(int val, int decimal = 0, int minWidth = 0);
 void writeFloat(float f);
 
 enum class State {
@@ -128,6 +129,8 @@ void setup() {
   pinMode(resetStatsPin, INPUT);  // Set the button as an input
   pinMode(audioDebugPin, INPUT);  // Set the button as an input
   pinMode(videoDebugPin, INPUT);  // Set the button as an input
+
+  Mouse.begin();
 }
 
 
@@ -648,19 +651,25 @@ void loop() {
       stats.reset();
       delay(4000);
     } else if (digitalRead(audioDebugPin)) {
-      // print debugging.
-      /*
-      static float runningBias = val + audioBias;
-      const float tc = .95f;
-      runningBias = runningBias * tc + (val + audioBias) * (1.0f - tc);
-      */
-      sout << F("Audio: ") << val << F(", bias: ") << runningBias << '\n';
-      //audioBias = static_cast<int>(runningBias + .5f);
+      // track the max over each window.n
+      static int maxAmp = 0;
+      maxAmp = max(maxAmp, abs(val));
+      static unsigned long lastOutMs = 0;  // last output, we output every 100 ms.
+      unsigned long ms = millis();
+      if ((ms - lastOutMs) > 100) {
+        lastOutMs = ms;
+        // fixed width.
+        char buffer[16];
+        sout << F("Audio: ") << writeIntToBuffer(buffer, sizeof(buffer), val, 0, 5);
+        sout << F(", bias: ") << runningBias << F(", maxAmp: ");
+        sout << writeIntToBuffer(buffer, sizeof(buffer), maxAmp, 0, 4) << '\n';
+        maxAmp = 0;
+      }
     } else if (digitalRead(videoDebugPin)) {
       // print debugging.
       sout << F("Optical: ") << analogRead(opticalPin) << '\n';
+      delay(100);
     }
-    delay(100);
 
   } else if (paused) {
     sout << F("UNPAUSED\n");
@@ -826,6 +835,12 @@ void loop() {
           }
         case State::DROP:
           {
+            // Turn right
+            const int amount = 300;
+            for (int i = 0; i < amount; ++i) {
+              Mouse.move(2, 0);
+              delay(1);
+            }
             // Drop everything in slot 8 with left ctrl
             Keyboard.write('8');
             delay(200);
@@ -836,7 +851,14 @@ void loop() {
             Keyboard.release(KEY_LEFT_CTRL);
             delay(200);
             Keyboard.write('9');
+
             delay(200);
+
+            for (int i = 0; i < amount; ++i) {
+              Mouse.move(-2, 0);
+              delay(1);
+            }
+
             state = State::CASTING;
             sampleTimeout = 4000;
             break;
@@ -986,31 +1008,45 @@ void writeChunksOf64() {
 
 #if defined(DEBUG) || defined(DEBUG2)
 
-void writeInt(int val, int decimal) {
-  if (val < 0) {
-    Keyboard.write('-');
-    val = -val;
+// Returns a pointer to the front of the buffer, since it fills from the back.
+char* writeIntToBuffer(char buffer[], int bufferSize, int val, int decimal, int minWidth) {
+  bool neg = val < 0;
+  val = abs(val);
+
+  decimal = bufferSize - 2 - decimal;
+
+  // easier to decompose backwards then write out the other way.
+  int index = bufferSize - 1;
+  buffer[index--] = 0;  // null term.
+  do {
+    buffer[index--] = '0' + (val % 10);
+    val /= 10;
+
+    if (index == decimal) {
+      buffer[index--] = '.';
+    }
+  } while (val > 0);
+
+  // may have been too small so pad with zeros.
+  while (index > decimal) {
+    buffer[index--] = '0';
   }
+  if (index == decimal) {
+    buffer[index--] = '.';
+  }
+  if (neg) {
+    buffer[index--] = '-';
+  }
+  while (bufferSize - 2 - index < minWidth) {
+    buffer[index--] = ' ';  // pad with spaces.
+  }
+  return buffer + ++index;
+}
+
+void writeInt(int val, int decimal, int minWidth) {
   // easier to decompose backwards then write out the other way.
   char buffer[16];
-  int index = 0;
-  do {
-    buffer[index++] = '0' + (val % 10);
-    val /= 10;
-  } while (val > 0);
-  if (decimal >= index) {
-    Keyboard.write('.');
-    for (int zeros = index; zeros < decimal; ++zeros) {
-      Keyboard.write('0');
-    }
-  }
-
-  while (--index >= 0) {
-    Keyboard.write(buffer[index]);
-    if (index == decimal) {
-      Keyboard.write('.');
-    }
-  }
+  Keyboard.print(writeIntToBuffer(buffer, sizeof(buffer), val, decimal, minWidth));
 }
 void writeFloat(float f) {
   writeInt(static_cast<int>(f * 100.0f), 2);
