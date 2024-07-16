@@ -7,10 +7,10 @@
 int pausePin = 4;     // set high to pause
 int trainingPin = 5;  // set high to train
 // These things are Only while paused
-int outputPin = 6;      // dump training data to spreadsheet
-int resetStatsPin = 7;  // reset the statistics
-int audioDebugPin = 8;  // show the raw audio feed (minus bias)
-int videoDebugPin = 9;  // show the raw video feed.
+int outputPin = 6;         // dump training data to spreadsheet
+int falseNegativePin = 7;  // test false negatives (can hurt gather rate if zombies are moaning, etc)
+int audioDebugPin = 8;     // show the raw audio feed (minus bias)
+int videoDebugPin = 9;     // show the raw video feed.
 
 int audioPin = A0;
 int opticalPin = A1;
@@ -123,12 +123,12 @@ public:
 SerialWrapper sout;
 
 void setup() {
-  pinMode(pausePin, INPUT);       // Set the button as an input
-  pinMode(trainingPin, INPUT);    // Set the button as an input
-  pinMode(outputPin, INPUT);      // Set the button as an input
-  pinMode(resetStatsPin, INPUT);  // Set the button as an input
-  pinMode(audioDebugPin, INPUT);  // Set the button as an input
-  pinMode(videoDebugPin, INPUT);  // Set the button as an input
+  pinMode(pausePin, INPUT);          // Set the button as an input
+  pinMode(trainingPin, INPUT);       // Set the button as an input
+  pinMode(outputPin, INPUT);         // Set the button as an input
+  pinMode(falseNegativePin, INPUT);  // Set the button as an input
+  pinMode(audioDebugPin, INPUT);     // Set the button as an input
+  pinMode(videoDebugPin, INPUT);     // Set the button as an input
 
   Mouse.begin();
 }
@@ -635,7 +635,6 @@ void loop() {
 
   //  Serial.println(analogRead(opticalPin));
   if (digitalRead(pausePin)) {
-
     if (!paused) {
       sout << F("PAUSED\n");
       paused = true;
@@ -644,12 +643,14 @@ void loop() {
     if (digitalRead(outputPin)) {
       kmeans.write();
       delay(4000);
+      /*
     } else if (digitalRead(resetStatsPin)) {
       sout << SW::RED << "RESETTING STATS\n";
       state = State::DROP;
       sampleTimeout = 3000;
       stats.reset();
       delay(4000);
+*/
     } else if (digitalRead(audioDebugPin)) {
       // track the max over each window.n
       static int maxAmp = 0;
@@ -722,7 +723,7 @@ void loop() {
         case State::LISTENING:
           {
             // timeout, we are stuck on something.
-            if (millis() - lastCastMs > 60000) {
+            if (millis() - lastCastMs > 120000) {
               sout << F(" LastCast Timeout exceeding, reeling in\n");
               Mouse.click(MOUSE_RIGHT);
               sampleTimeout = 8000;  // wait a second before dropping.
@@ -758,7 +759,7 @@ void loop() {
                 } else {
                   ++stats.trueNegatives;
                   // check for false negitaves (todo make a switch.)
-                  bool checkForFalseNegative = true;
+                  const bool checkForFalseNegative = digitalRead(falseNegativePin);
                   if (checkForFalseNegative) {
                     // need to pre-look and reel in to test properly.
                     state = State::PRE_LOOK;
